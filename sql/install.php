@@ -22,11 +22,18 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'clicktracker_log` (
     `id_product` INT(11) UNSIGNED NULL DEFAULT NULL,
     `product_name` VARCHAR(255) NULL DEFAULT NULL,
     `id_category` INT(11) UNSIGNED NULL DEFAULT NULL,
+    `id_manufacturer` INT(11) UNSIGNED NULL DEFAULT NULL,
     `page_url` VARCHAR(500) NOT NULL,
     `page_path` VARCHAR(500) NULL DEFAULT NULL,
     `page_title` VARCHAR(255) NULL DEFAULT NULL,
     `clicked_class` VARCHAR(255) NOT NULL,
     `element_type` VARCHAR(50) NOT NULL,
+    `traffic_source` VARCHAR(32) NULL DEFAULT NULL,
+    `utm_source` VARCHAR(100) NULL DEFAULT NULL,
+    `utm_medium` VARCHAR(100) NULL DEFAULT NULL,
+    `utm_campaign` VARCHAR(255) NULL DEFAULT NULL,
+    `referrer_host` VARCHAR(255) NULL DEFAULT NULL,
+    `device` VARCHAR(10) NULL DEFAULT NULL,
     `date_add` DATETIME NOT NULL,
     PRIMARY KEY (`id_clicktracker_log`),
     INDEX `idx_id_product` (`id_product`),
@@ -35,7 +42,19 @@ $sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'clicktracker_log` (
     INDEX `idx_context_date` (`context_type`, `date_add`),
     INDEX `idx_element_type` (`element_type`),
     INDEX `idx_shop_date` (`id_shop`, `date_add`),
-    INDEX `idx_page_path` (`page_path`(191))
+    INDEX `idx_page_path` (`page_path`(191)),
+    INDEX `idx_source_date` (`traffic_source`, `date_add`),
+    INDEX `idx_manufacturer` (`id_manufacturer`)
+) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;';
+
+// Daily product page views (for click-through rate)
+$sql[] = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'clicktracker_product_view` (
+    `id_shop` INT(11) UNSIGNED NOT NULL,
+    `id_product` INT(11) UNSIGNED NOT NULL,
+    `date_view` DATE NOT NULL,
+    `views` INT(11) UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (`id_shop`, `id_product`, `date_view`),
+    INDEX `idx_date_view` (`date_view`)
 ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;';
 
 // Rate limiting table (one row per hashed client IP, no personal data stored in clear)

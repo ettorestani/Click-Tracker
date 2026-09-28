@@ -2,7 +2,7 @@
 
 [![Support via PayPal](https://img.shields.io/badge/Support-PayPal-blue?logo=paypal)](https://www.paypal.com/paypalme/ettorestani)
 [![PrestaShop](https://img.shields.io/badge/PrestaShop-1.7.x--8.x-blue.svg)](https://www.prestashop.com/)
-[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](https://github.com/ettorestani/Click-Tracker)
+[![Version](https://img.shields.io/badge/version-1.2.0-green.svg)](https://github.com/ettorestani/Click-Tracker)
 [![License](https://img.shields.io/badge/license-AFL%203.0-orange.svg)](https://opensource.org/licenses/AFL-3.0)
 [![PHP](https://img.shields.io/badge/php-7.2%2B-blue.svg)](https://www.php.net/)
 
@@ -307,6 +307,19 @@ This module is released under the [Academic Free License (AFL 3.0)](https://open
 - Website: https://www.ettorestani.it
 
 ## Changelog
+
+### Version 1.2.0
+- Traffic source of each click (Google Ads, Google organic/Shopping, Meta, other search engines, social, email, UTM campaigns, other websites, direct, internal) with UTM fields and referrer host; optional first-touch attribution (sessionStorage, disabled by default)
+- Labels and forced element type per selector (`selector | label | type`)
+- Statistics by category and brand
+- Device (desktop/tablet/mobile) and clicks by hour of day / day of week
+- Comparison with the previous period (cards and traffic sources)
+- Product click-through rate from product page views counted by the module
+- New Logs filters (source, device) and CSV columns
+- Robustness: until the upgrade has completed, clicks are written only to the columns that exist (from any older version, 1.0.0 included), the legacy `displayHeader` hook keeps loading the script, and logs/statistics show a notice instead of failing; reinstalling over kept data migrates the old table
+- The rate limit (60 requests/minute per IP, clicks + views) fails open and never blocks tracking because of an internal error; unexpected PHP errors always return JSON
+- Chart data printed in inline scripts is JSON-encoded with HEX escaping; back office warning messages escape user input
+- Non-destructive, re-runnable upgrade script (existing clicks are backfilled with source and brand)
 
 ### Version 1.1.0
 - Security: page URL and Origin restricted to the shop domains, configured selectors only, product data resolved server side, per-IP rate limiting (no PHP session)

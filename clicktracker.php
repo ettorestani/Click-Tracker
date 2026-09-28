@@ -8,7 +8,7 @@
  * @author    Ettore Stani
  * @copyright 2024 Ettore Stani
  * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License 3.0 (AFL-3.0)
- * @version   1.1.0
+ * @version   1.2.0
  */
 
 if (!defined('_PS_VERSION_')) {
@@ -16,6 +16,7 @@ if (!defined('_PS_VERSION_')) {
 }
 
 require_once dirname(__FILE__) . '/classes/ClickTrackerLog.php';
+require_once dirname(__FILE__) . '/classes/ClickTrackerSource.php';
 
 class ClickTracker extends Module
 {
@@ -25,7 +26,7 @@ class ClickTracker extends Module
     /** @var int Above this number of days the time chart is grouped by month */
     const CHART_DAILY_MAX_DAYS = 92;
 
-    /** @var array Configuration keys */
+    /** @var array Configuration keys editable in the form */
     protected $configKeys = array(
         'CSS_CLASSES',
         'BODY_CLASSES',
@@ -33,6 +34,26 @@ class ClickTracker extends Module
         'TRACK_CMS',
         'TRACK_OTHER',
         'EXTERNAL_ONLY',
+        'TRACK_VIEWS',
+        'FIRST_TOUCH',
+        'DEBUG',
+        'DELETE_ON_UNINSTALL',
+    );
+
+    /** @var array Internal configuration keys (not in the form) */
+    protected $internalConfigKeys = array(
+        'SCHEMA_VERSION',
+        'VIEWS_SINCE',
+    );
+
+    /** @var array Switch keys of the configuration form */
+    protected $switchKeys = array(
+        'TRACK_PRODUCT',
+        'TRACK_CMS',
+        'TRACK_OTHER',
+        'EXTERNAL_ONLY',
+        'TRACK_VIEWS',
+        'FIRST_TOUCH',
         'DEBUG',
         'DELETE_ON_UNINSTALL',
     );
@@ -45,6 +66,9 @@ class ClickTracker extends Module
         'other' => '#6c757d',
     );
 
+    /** @var array|null Parsed selector configuration cache */
+    protected $selectorConfig = null;
+
     /**
      * Module constructor
      */
@@ -52,7 +76,7 @@ class ClickTracker extends Module
     {
         $this->name = 'clicktracker';
         $this->tab = 'analytics_stats';
-        $this->version = '1.1.0';
+        $this->version = '1.2.0';
         $this->author = 'Ettore Stani';
         $this->need_instance = 0;
         $this->ps_versions_compliancy = array(
@@ -86,7 +110,29 @@ class ClickTracker extends Module
 
         return parent::install()
             && $this->registerHook('actionFrontControllerSetMedia')
+            && $this->migrateExistingSchema()
             && $this->setDefaultConfiguration();
+    }
+
+    /**
+     * Bring a table kept from a previous version (uninstall without data deletion) to the
+     * current schema. The upgrade scripts are idempotent and never delete data.
+     *
+     * @return bool
+     */
+    protected function migrateExistingSchema()
+    {
+        foreach (array('1.1.0', '1.2.0') as $version) {
+            $function = 'upgrade_module_' . str_replace('.', '_', $version);
+            if (!function_exists($function)) {
+                require_once dirname(__FILE__) . '/upgrade/upgrade-' . $version . '.php';
+            }
+            if (!$function($this)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -107,6 +153,13 @@ class ClickTracker extends Module
             Configuration::deleteByName(self::CONFIG_PREFIX . $key);
         }
 
+        // Kept with the data, so a reinstall does not count views from the wrong date
+        if ($deleteLogs) {
+            foreach ($this->internalConfigKeys as $key) {
+                Configuration::deleteByName(self::CONFIG_PREFIX . $key);
+            }
+        }
+
         return parent::uninstall();
     }
 
@@ -117,14 +170,31 @@ class ClickTracker extends Module
      */
     protected function setDefaultConfiguration()
     {
-        return Configuration::updateValue(self::CONFIG_PREFIX . 'CSS_CLASSES', '')
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'BODY_CLASSES', '')
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_PRODUCT', 1)
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_CMS', 1)
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_OTHER', 0)
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'EXTERNAL_ONLY', 0)
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'DEBUG', 0)
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'DELETE_ON_UNINSTALL', 0);
+        $defaults = array(
+            'CSS_CLASSES' => '',
+            'BODY_CLASSES' => '',
+            'TRACK_PRODUCT' => 1,
+            'TRACK_CMS' => 1,
+            'TRACK_OTHER' => 0,
+            'EXTERNAL_ONLY' => 0,
+            'TRACK_VIEWS' => 1,
+            'FIRST_TOUCH' => 0,
+            'DEBUG' => 0,
+            'DELETE_ON_UNINSTALL' => 0,
+        );
+
+        foreach ($defaults as $key => $value) {
+            if (!Configuration::updateValue(self::CONFIG_PREFIX . $key, $value)) {
+                return false;
+            }
+        }
+
+        if (Configuration::getGlobalValue(self::CONFIG_PREFIX . 'VIEWS_SINCE') === false) {
+            Configuration::updateGlobalValue(self::CONFIG_PREFIX . 'VIEWS_SINCE', date('Y-m-d H:i:s'));
+        }
+
+        // Fresh install creates the full schema
+        return Configuration::updateGlobalValue(self::CONFIG_PREFIX . 'SCHEMA_VERSION', ClickTrackerLog::SCHEMA_VERSION);
     }
 
     /**
@@ -140,6 +210,12 @@ class ClickTracker extends Module
         }
 
         $output = '';
+
+        // Logs, statistics and export need the current schema; clicks are tracked anyway
+        $schemaReady = ClickTrackerLog::isSchemaReady();
+        if (!$schemaReady) {
+            $output .= $this->displayWarning($this->l('The module database has not been upgraded yet: logs and statistics are not available until the module upgrade is run from the Module Manager. Clicks are still being tracked.'));
+        }
 
         // Handle form submissions (POST only for security)
         if (Tools::isSubmit('submitClickTrackerConfig')) {
@@ -157,7 +233,7 @@ class ClickTracker extends Module
         }
 
         // Handle CSV export
-        if (Tools::isSubmit('exportCsv')) {
+        if ($schemaReady && Tools::isSubmit('exportCsv')) {
             $this->processExportCsv();
         }
 
@@ -181,10 +257,10 @@ class ClickTracker extends Module
 
         switch ($activeTab) {
             case 'logs':
-                $output .= $this->renderLogsPage();
+                $output .= $schemaReady ? $this->renderLogsPage() : '';
                 break;
             case 'stats':
-                $output .= $this->renderStatsPage();
+                $output .= $schemaReady ? $this->renderStatsPage() : '';
                 break;
             default:
                 $output .= $this->renderConfigForm();
@@ -307,7 +383,7 @@ class ClickTracker extends Module
                         'type' => 'textarea',
                         'label' => $this->l('CSS Selectors to Track'),
                         'name' => self::CONFIG_PREFIX . 'CSS_CLASSES',
-                        'desc' => $this->l('Enter CSS selectors to track, one per line. Examples: .btn-wa, #call-button, a[href^="tel:"], a[href*="wa.me"]. Only elements matching these selectors will be tracked.'),
+                        'desc' => $this->l('One per line, in the form: selector | label | type. Label and type are optional; type can be whatsapp, phone, maps or other and overrides automatic detection. Examples: .btn-wa | WhatsApp, .btn-prenota-consulenza | Book a consultation, a[href^="tel:"] | Phone | phone'),
                         'cols' => 60,
                         'rows' => 6,
                     ),
@@ -323,6 +399,8 @@ class ClickTracker extends Module
                     $this->getSwitchField('TRACK_CMS', $this->l('Track CMS/Blog Pages'), $this->l('Enable click tracking on CMS and blog pages.')),
                     $this->getSwitchField('TRACK_OTHER', $this->l('Track All Other Pages'), $this->l('Enable click tracking on every other page (home, categories, 404, contact...).')),
                     $this->getSwitchField('EXTERNAL_ONLY', $this->l('Track External Links Only'), $this->l('Track only links that leave the shop: links to other domains and tel:, mailto:, whatsapp: links. Internal links and buttons without href are ignored.')),
+                    $this->getSwitchField('TRACK_VIEWS', $this->l('Count Product Views'), $this->l('Count product page views to compute the click-through rate (clicks / views) per product. Adds one lightweight request per product page view.')),
+                    $this->getSwitchField('FIRST_TOUCH', $this->l('First-Touch Source Attribution'), $this->l('Attribute each click to the source of the first page of the visit (e.g. a Google Ads landing page) instead of the page where the click happened. Stores the landing page in the browser sessionStorage: enable it only if your cookie/consent policy covers it.')),
                     $this->getSwitchField('DEBUG', $this->l('Debug Mode'), $this->l('Enable debug mode to log JavaScript errors to browser console.')),
                     $this->getSwitchField('DELETE_ON_UNINSTALL', $this->l('Delete Data on Uninstall'), $this->l('If enabled, all click logs are permanently deleted when the module is uninstalled or reset.')),
                 ),
@@ -361,52 +439,97 @@ class ClickTracker extends Module
 
         Configuration::updateValue(self::CONFIG_PREFIX . 'CSS_CLASSES', $cssClasses);
         Configuration::updateValue(self::CONFIG_PREFIX . 'BODY_CLASSES', $bodyClasses);
+        $this->selectorConfig = null;
 
-        foreach (array('TRACK_PRODUCT', 'TRACK_CMS', 'TRACK_OTHER', 'EXTERNAL_ONLY', 'DEBUG', 'DELETE_ON_UNINSTALL') as $key) {
+        foreach ($this->switchKeys as $key) {
             Configuration::updateValue(self::CONFIG_PREFIX . $key, (int) Tools::getValue(self::CONFIG_PREFIX . $key));
         }
 
         $output = $this->displayConfirmation($this->l('Settings saved successfully.'));
         if (!empty($rejected)) {
-            $output .= $this->displayWarning($this->l('The following selectors were ignored because they are not valid:') . ' ' . implode(', ', $rejected));
+            $output .= $this->displayWarning($this->l('The following selectors were ignored because they are not valid:') . ' '
+                . htmlspecialchars(implode(', ', $rejected), ENT_QUOTES, 'UTF-8'));
         }
 
         return $output;
     }
 
     /**
-     * Validate and clean tracked CSS selectors
+     * Parse one "selector | label | type" line
      *
-     * Simple words are treated as classes; full CSS selectors (attributes, combinators) are allowed.
+     * @param string $line Raw line
+     * @return array|null selector, label, type; null if invalid
+     */
+    protected function parseSelectorLine($line)
+    {
+        // "|=" is a valid CSS attribute operator, not a separator
+        $parts = array_map('trim', preg_split('/\|(?!=)/', trim($line)));
+        if (count($parts) > 3) {
+            return null;
+        }
+
+        $selector = $parts[0];
+        $label = isset($parts[1]) ? $parts[1] : '';
+        $type = isset($parts[2]) ? Tools::strtolower($parts[2]) : '';
+
+        // Bare word: treat as class name
+        if (preg_match('/^[a-zA-Z_\-][a-zA-Z0-9_\-]*$/', $selector)) {
+            $selector = '.' . $selector;
+        }
+
+        // Allowed CSS selector characters only (no braces, angle brackets or semicolons)
+        if ($selector === '' || Tools::strlen($selector) > 200 || !preg_match('/^[a-zA-Z0-9_\-.#\[\]=^$*~|"\' :(),>+]+$/', $selector)) {
+            return null;
+        }
+        if ($label !== '' && !preg_match('/^[^<>{}|\r\n]{1,64}$/u', $label)) {
+            return null;
+        }
+        if ($type !== '' && !ClickTrackerLog::isValidElementType($type)) {
+            return null;
+        }
+
+        return array('selector' => $selector, 'label' => $label, 'type' => $type);
+    }
+
+    /**
+     * Validate and clean tracked CSS selectors
      *
      * @param string $input Raw input
      * @param array $rejected Collects rejected lines
-     * @return string Cleaned selectors, one per line
+     * @return string Cleaned lines "selector | label | type"
      */
     protected function validateCssSelectors($input, array &$rejected)
     {
         $cleaned = array();
+        $seen = array();
 
         foreach (preg_split('/\r\n|\r|\n/', (string) $input) as $line) {
-            $line = trim($line);
-            if ($line === '') {
+            if (trim($line) === '') {
                 continue;
             }
 
-            // Bare word: treat as class name
-            if (preg_match('/^[a-zA-Z_\-][a-zA-Z0-9_\-]*$/', $line)) {
-                $line = '.' . $line;
+            $entry = $this->parseSelectorLine($line);
+            if ($entry === null) {
+                $rejected[] = trim($line);
+                continue;
             }
 
-            // Allowed CSS selector characters only (no braces, angle brackets or semicolons)
-            if (Tools::strlen($line) <= 255 && preg_match('/^[a-zA-Z0-9_\-.#\[\]=^$*~|"\' :(),>+]+$/', $line)) {
-                $cleaned[] = $line;
-            } else {
-                $rejected[] = $line;
+            if (isset($seen[$entry['selector']])) {
+                continue;
             }
+            $seen[$entry['selector']] = true;
+
+            $normalized = $entry['selector'];
+            if ($entry['label'] !== '' || $entry['type'] !== '') {
+                $normalized .= ' | ' . $entry['label'];
+            }
+            if ($entry['type'] !== '') {
+                $normalized .= ' | ' . $entry['type'];
+            }
+            $cleaned[] = $normalized;
         }
 
-        return implode("\n", array_unique($cleaned));
+        return implode("\n", $cleaned);
     }
 
     /**
@@ -442,30 +565,63 @@ class ClickTracker extends Module
     }
 
     /**
-     * Configured selectors to track
+     * Configured selectors, indexed by the value stored in clicked_class
+     *
+     * @return array clicked_class => [selector, label, type]
+     */
+    public function getSelectorConfig()
+    {
+        if ($this->selectorConfig !== null) {
+            return $this->selectorConfig;
+        }
+
+        $this->selectorConfig = array();
+        $config = (string) Configuration::get(self::CONFIG_PREFIX . 'CSS_CLASSES');
+
+        foreach (preg_split('/\r\n|\r|\n/', $config) as $line) {
+            if (trim($line) === '') {
+                continue;
+            }
+            $entry = $this->parseSelectorLine($line);
+            if ($entry !== null) {
+                $this->selectorConfig[self::getSelectorLabel($entry['selector'])] = $entry;
+            }
+        }
+
+        return $this->selectorConfig;
+    }
+
+    /**
+     * Configured selectors to track (CSS only, for the frontend script)
      *
      * @return array
      */
     public function getTrackedSelectors()
     {
-        $config = (string) Configuration::get(self::CONFIG_PREFIX . 'CSS_CLASSES');
+        $selectors = array();
+        foreach ($this->getSelectorConfig() as $entry) {
+            $selectors[] = $entry['selector'];
+        }
 
-        return array_values(array_filter(array_map('trim', explode("\n", $config)), 'strlen'));
+        return $selectors;
     }
 
     /**
-     * Labels stored in clicked_class for each configured selector
+     * Human readable name of a stored clicked_class value
      *
-     * @return array
+     * @param string $clickedClass Stored value
+     * @return string Configured label, or the selector itself
      */
-    public function getTrackedSelectorLabels()
+    protected function getActionLabel($clickedClass)
     {
-        return array_map(array('ClickTracker', 'getSelectorLabel'), $this->getTrackedSelectors());
+        $config = $this->getSelectorConfig();
+
+        return !empty($config[$clickedClass]['label']) ? $config[$clickedClass]['label'] : $clickedClass;
     }
 
     /**
-     * Label stored for a selector: simple ".class" selectors are stored without the dot
-     * (same rule as tracker.js)
+     * Value stored in clicked_class for a selector: simple ".class" selectors are stored
+     * without the dot (same rule as tracker.js)
      *
      * @param string $selector CSS selector
      * @return string
@@ -503,6 +659,42 @@ class ClickTracker extends Module
             'phone' => $this->l('Phone'),
             'maps' => $this->l('Maps'),
             'other' => $this->l('Other'),
+        );
+    }
+
+    /**
+     * Traffic source labels
+     *
+     * @return array
+     */
+    protected function getSourceLabels()
+    {
+        return array(
+            ClickTrackerSource::GOOGLE_ADS => $this->l('Google Ads'),
+            ClickTrackerSource::GOOGLE_ORGANIC => $this->l('Google (organic/Shopping)'),
+            ClickTrackerSource::META => $this->l('Meta (Facebook/Instagram)'),
+            ClickTrackerSource::SEARCH => $this->l('Other search engines'),
+            ClickTrackerSource::SOCIAL => $this->l('Other social networks'),
+            ClickTrackerSource::EMAIL => $this->l('Email/Newsletter'),
+            ClickTrackerSource::CAMPAIGN => $this->l('Other campaigns (UTM)'),
+            ClickTrackerSource::REFERRAL => $this->l('Other websites'),
+            ClickTrackerSource::DIRECT => $this->l('Direct'),
+            ClickTrackerSource::INTERNAL => $this->l('Internal navigation'),
+            ClickTrackerSource::UNKNOWN => $this->l('Unknown'),
+        );
+    }
+
+    /**
+     * Device labels
+     *
+     * @return array
+     */
+    protected function getDeviceLabels()
+    {
+        return array(
+            ClickTrackerLog::DEVICE_MOBILE => $this->l('Mobile'),
+            ClickTrackerLog::DEVICE_TABLET => $this->l('Tablet'),
+            ClickTrackerLog::DEVICE_DESKTOP => $this->l('Desktop'),
         );
     }
 
@@ -545,20 +737,51 @@ class ClickTracker extends Module
      */
     protected function getLogFilters()
     {
-        $context = Tools::getValue('filter_context', '');
-        $element = Tools::getValue('filter_element', '');
-
-        $filters = array(
-            'context_type' => array_key_exists($context, $this->getContextTypeLabels()) ? $context : '',
-            'element_type' => array_key_exists($element, $this->getElementTypeLabels()) ? $element : '',
-            'date_from' => $this->sanitizeDate(Tools::getValue('filter_date_from', '')),
-            'date_to' => $this->sanitizeDate(Tools::getValue('filter_date_to', '')),
-            'search' => trim((string) Tools::getValue('filter_search', '')),
+        $values = array(
+            'context_type' => array((string) Tools::getValue('filter_context', ''), $this->getContextTypeLabels()),
+            'element_type' => array((string) Tools::getValue('filter_element', ''), $this->getElementTypeLabels()),
+            'traffic_source' => array((string) Tools::getValue('filter_source', ''), $this->getSourceLabels()),
+            'device' => array((string) Tools::getValue('filter_device', ''), $this->getDeviceLabels()),
         );
+
+        $filters = array();
+        foreach ($values as $name => $value) {
+            $filters[$name] = array_key_exists($value[0], $value[1]) ? $value[0] : '';
+        }
+
+        $filters['date_from'] = $this->sanitizeDate(Tools::getValue('filter_date_from', ''));
+        $filters['date_to'] = $this->sanitizeDate(Tools::getValue('filter_date_to', ''));
+        $filters['search'] = trim((string) Tools::getValue('filter_search', ''));
 
         return array_filter($filters, function ($value) {
             return $value !== '';
         });
+    }
+
+    /**
+     * Request parameters that reproduce the given filters
+     *
+     * @param array $filters Filters
+     * @return array
+     */
+    protected function getFilterParams(array $filters)
+    {
+        $map = array(
+            'filter_context' => 'context_type',
+            'filter_element' => 'element_type',
+            'filter_source' => 'traffic_source',
+            'filter_device' => 'device',
+            'filter_date_from' => 'date_from',
+            'filter_date_to' => 'date_to',
+            'filter_search' => 'search',
+        );
+
+        $params = array();
+        foreach ($map as $param => $filter) {
+            $params[$param] = isset($filters[$filter]) ? $filters[$filter] : '';
+        }
+
+        return $params;
     }
 
     /**
@@ -578,20 +801,22 @@ class ClickTracker extends Module
         // Get paginated logs
         $result = ClickTrackerLog::getLogsWithPagination($page, $perPage, $filters, $orderBy, $orderDir);
 
-        // Only http(s) URLs are rendered as links (old rows were not validated server side)
+        $sourceLabels = $this->getSourceLabels();
+        $deviceLabels = $this->getDeviceLabels();
+
         foreach ($result['items'] as &$item) {
+            // Only http(s) URLs are rendered as links (old rows were not validated server side)
             $item['has_safe_url'] = (bool) preg_match('#^https?://#i', $item['page_url']);
+            $item['action_label'] = $this->getActionLabel($item['clicked_class']);
+
+            $source = isset($item['traffic_source']) ? $item['traffic_source'] : null;
+            $item['source_label'] = $source !== null && isset($sourceLabels[$source]) ? $sourceLabels[$source] : '';
+            $device = isset($item['device']) ? $item['device'] : null;
+            $item['device_label'] = $device !== null && isset($deviceLabels[$device]) ? $deviceLabels[$device] : '';
         }
         unset($item);
 
-        // Query string used by pagination links (URL-encoded)
-        $filterQuery = http_build_query(array(
-            'filter_context' => isset($filters['context_type']) ? $filters['context_type'] : '',
-            'filter_element' => isset($filters['element_type']) ? $filters['element_type'] : '',
-            'filter_date_from' => isset($filters['date_from']) ? $filters['date_from'] : '',
-            'filter_date_to' => isset($filters['date_to']) ? $filters['date_to'] : '',
-            'filter_search' => isset($filters['search']) ? $filters['search'] : '',
-        ));
+        $filterParams = $this->getFilterParams($filters);
 
         $this->context->smarty->assign(array(
             'logs' => $result['items'],
@@ -602,20 +827,58 @@ class ClickTracker extends Module
             'filters' => $filters + array(
                 'context_type' => '',
                 'element_type' => '',
+                'traffic_source' => '',
+                'device' => '',
                 'date_from' => '',
                 'date_to' => '',
                 'search' => '',
             ),
-            'filter_query' => $filterQuery,
+            'filter_params' => $filterParams,
+            // Query string used by pagination links (URL-encoded)
+            'filter_query' => http_build_query($filterParams),
             'order_by' => $orderBy,
             'order_dir' => $orderDir,
             'element_types' => $this->getElementTypeLabels(),
             'context_types' => $this->getContextTypeLabels(),
+            'source_types' => $sourceLabels,
+            'device_types' => $deviceLabels,
+            'schema_ready' => ClickTrackerLog::isSchemaReady(),
             'moduleLink' => $this->getModuleAdminLink(array('section' => 'logs')),
             'token' => Tools::getAdminTokenLite('AdminModules'),
         ));
 
         return $this->context->smarty->fetch($this->local_path . 'views/templates/admin/logs.tpl');
+    }
+
+    /**
+     * JSON safe to print inside an inline <script> block
+     *
+     * @param mixed $value
+     * @return string
+     */
+    protected function jsonForScript($value)
+    {
+        return json_encode($value, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    }
+
+    /**
+     * Percentage change between two values
+     *
+     * @param int $current Current value
+     * @param int $previous Previous value
+     * @return array value, previous, pct (null when previous is 0), dir (up/down/flat)
+     */
+    protected function compareValues($current, $previous)
+    {
+        $current = (int) $current;
+        $previous = (int) $previous;
+
+        return array(
+            'value' => $current,
+            'previous' => $previous,
+            'pct' => $previous > 0 ? (int) round(($current - $previous) / $previous * 100) : null,
+            'dir' => $current > $previous ? 'up' : ($current < $previous ? 'down' : 'flat'),
+        );
     }
 
     /**
@@ -632,50 +895,140 @@ class ClickTracker extends Module
             list($dateFrom, $dateTo) = array($dateTo, $dateFrom);
         }
 
-        $elementTypeLabels = $this->getElementTypeLabels();
+        // Previous period of the same length, ending the day before the selected one
+        $days = (int) round((strtotime($dateTo) - strtotime($dateFrom)) / 86400) + 1;
+        $prevTo = date('Y-m-d', strtotime($dateFrom . ' -1 day'));
+        $prevFrom = date('Y-m-d', strtotime($prevTo . ' -' . ($days - 1) . ' days'));
 
-        // Overview cards (all but "this month" follow the selected period)
+        // This month so far vs the same days of the previous month
+        $monthStart = date('Y-m-01');
+        $prevMonthStart = date('Y-m-01', strtotime($monthStart . ' -1 month'));
+        $prevMonthEnd = date('Y-m-d', min(
+            strtotime($prevMonthStart . ' +' . ((int) date('j') - 1) . ' days'),
+            strtotime(date('Y-m-t', strtotime($prevMonthStart)))
+        ));
+
+        $elementTypeLabels = $this->getElementTypeLabels();
+        $sourceLabels = $this->getSourceLabels();
+        $deviceLabels = $this->getDeviceLabels();
+        $idLang = (int) $this->context->language->id;
+
+        // Overview cards
         $periodClicks = ClickTrackerLog::getTotalClicks(array('date_from' => $dateFrom, 'date_to' => $dateTo));
-        $thisMonthClicks = ClickTrackerLog::getThisMonthClicks();
+        $periodCompare = $this->compareValues(
+            $periodClicks,
+            ClickTrackerLog::getTotalClicks(array('date_from' => $prevFrom, 'date_to' => $prevTo))
+        );
+        $monthCompare = $this->compareValues(
+            ClickTrackerLog::getTotalClicks(array('date_from' => $monthStart, 'date_to' => date('Y-m-d'))),
+            ClickTrackerLog::getTotalClicks(array('date_from' => $prevMonthStart, 'date_to' => $prevMonthEnd))
+        );
         $mostClickedType = ClickTrackerLog::getMostClickedElementType($dateFrom, $dateTo);
         $topProductsList = ClickTrackerLog::getTopProducts(10, $dateFrom, $dateTo);
         $topProduct = !empty($topProductsList) ? $topProductsList[0] : null;
 
-        // Chart data
-        $days = (strtotime($dateTo) - strtotime($dateFrom)) / 86400;
+        // Time chart
         $groupBy = $days > self::CHART_DAILY_MAX_DAYS ? 'month' : 'day';
         $clicksByDate = ClickTrackerLog::getClicksGroupedByDate($dateFrom, $dateTo, $groupBy);
-        $clicksByElement = ClickTrackerLog::getClicksGroupedByElementType($dateFrom, $dateTo);
-        $clicksByContext = ClickTrackerLog::getClicksGroupedByContext($dateFrom, $dateTo);
-        $topPagesList = ClickTrackerLog::getTopPages(10, $dateFrom, $dateTo);
 
+        // Element types (doughnut, colors bound to the type)
         $pieLabels = array();
         $pieCounts = array();
         $pieColors = array();
-        foreach ($clicksByElement as $row) {
+        foreach (ClickTrackerLog::getClicksGroupedByElementType($dateFrom, $dateTo) as $row) {
             $type = $row['element_type'];
             $pieLabels[] = isset($elementTypeLabels[$type]) ? $elementTypeLabels[$type] : $type;
             $pieCounts[] = (int) $row['total'];
             $pieColors[] = isset($this->elementColors[$type]) ? $this->elementColors[$type] : $this->elementColors['other'];
         }
 
+        // Traffic sources with comparison
+        $previousSources = array();
+        foreach (ClickTrackerLog::getClicksGroupedBySource($prevFrom, $prevTo) as $row) {
+            $previousSources[(string) $row['traffic_source']] = (int) $row['total'];
+        }
+        $sources = array();
+        foreach (ClickTrackerLog::getClicksGroupedBySource($dateFrom, $dateTo) as $row) {
+            $key = (string) $row['traffic_source'];
+            $code = $key === '' ? ClickTrackerSource::UNKNOWN : $key;
+            $sources[] = array(
+                'label' => isset($sourceLabels[$code]) ? $sourceLabels[$code] : $code,
+                'share' => $periodClicks > 0 ? round($row['total'] / $periodClicks * 100, 1) : 0,
+            ) + $this->compareValues($row['total'], isset($previousSources[$key]) ? $previousSources[$key] : 0);
+        }
+
+        // Actions (configured labels)
+        $actions = array();
+        foreach (ClickTrackerLog::getClicksGroupedBySelector($dateFrom, $dateTo) as $row) {
+            $actions[] = array(
+                'label' => $this->getActionLabel($row['clicked_class']),
+                'selector' => $row['clicked_class'],
+                'total' => (int) $row['total'],
+            );
+        }
+
+        // Devices (only clicks recorded since 1.2.0 have one)
+        $devices = array();
+        $deviceRows = ClickTrackerLog::getClicksGroupedByDevice($dateFrom, $dateTo);
+        $deviceTotal = 0;
+        foreach ($deviceRows as $row) {
+            $deviceTotal += (int) $row['total'];
+        }
+        foreach ($deviceRows as $row) {
+            $devices[] = array(
+                'label' => isset($deviceLabels[$row['device']]) ? $deviceLabels[$row['device']] : $row['device'],
+                'total' => (int) $row['total'],
+                'share' => $deviceTotal > 0 ? round($row['total'] / $deviceTotal * 100, 1) : 0,
+            );
+        }
+
+        // Hours and weekdays
+        $weekdayLabels = array(
+            $this->l('Mon'), $this->l('Tue'), $this->l('Wed'), $this->l('Thu'),
+            $this->l('Fri'), $this->l('Sat'), $this->l('Sun'),
+        );
+        $hourLabels = array();
+        foreach (range(0, 23) as $hour) {
+            $hourLabels[] = sprintf('%02d', $hour);
+        }
+
+        // Click-through rate
+        $ctr = ClickTrackerLog::getProductCtr(15, $dateFrom, $dateTo, Configuration::get(self::CONFIG_PREFIX . 'VIEWS_SINCE'), $idLang);
+        $ctr['rate'] = $ctr['views'] > 0 ? round($ctr['clicks'] / $ctr['views'] * 100, 1) : null;
+        $ctr['since'] = Configuration::get(self::CONFIG_PREFIX . 'VIEWS_SINCE');
+
         $this->context->smarty->assign(array(
-            'period_clicks' => $periodClicks,
-            'this_month_clicks' => $thisMonthClicks,
+            'schema_ready' => ClickTrackerLog::isSchemaReady(),
+            'period_compare' => $periodCompare,
+            'month_compare' => $monthCompare,
+            'prev_from' => $prevFrom,
+            'prev_to' => $prevTo,
             'most_clicked_type' => $mostClickedType ? (isset($elementTypeLabels[$mostClickedType]) ? $elementTypeLabels[$mostClickedType] : $mostClickedType) : '-',
             'top_product' => $topProduct,
             'date_from' => $dateFrom,
             'date_to' => $dateTo,
             'has_period_clicks' => $periodClicks > 0,
-            'chart_dates' => json_encode(array_keys($clicksByDate)),
-            'chart_counts' => json_encode(array_values($clicksByDate)),
-            'pie_labels' => json_encode($pieLabels),
-            'pie_counts' => json_encode($pieCounts),
-            'pie_colors' => json_encode($pieColors),
-            'clicks_by_context' => $clicksByContext,
+            'chart_dates' => $this->jsonForScript(array_keys($clicksByDate)),
+            'chart_counts' => $this->jsonForScript(array_values($clicksByDate)),
+            'pie_labels' => $this->jsonForScript($pieLabels),
+            'pie_counts' => $this->jsonForScript($pieCounts),
+            'pie_colors' => $this->jsonForScript($pieColors),
+            'hour_labels' => $this->jsonForScript($hourLabels),
+            'hour_counts' => $this->jsonForScript(array_values(ClickTrackerLog::getClicksByHour($dateFrom, $dateTo))),
+            'weekday_labels' => $this->jsonForScript($weekdayLabels),
+            'weekday_counts' => $this->jsonForScript(array_values(ClickTrackerLog::getClicksByWeekday($dateFrom, $dateTo))),
+            'sources' => $sources,
+            'actions' => $actions,
+            'devices' => $devices,
+            'device_total' => $deviceTotal,
+            'top_categories' => ClickTrackerLog::getTopCategories(10, $dateFrom, $dateTo, $idLang),
+            'top_manufacturers' => ClickTrackerLog::getTopManufacturers(10, $dateFrom, $dateTo),
+            'ctr' => $ctr,
+            'ctr_enabled' => (bool) Configuration::get(self::CONFIG_PREFIX . 'TRACK_VIEWS'),
+            'clicks_by_context' => ClickTrackerLog::getClicksGroupedByContext($dateFrom, $dateTo),
             'context_types' => $this->getContextTypeLabels(),
             'top_products' => $topProductsList,
-            'top_pages' => $topPagesList,
+            'top_pages' => ClickTrackerLog::getTopPages(10, $dateFrom, $dateTo),
             'moduleLink' => $this->getModuleAdminLink(array('section' => 'stats')),
             'admin_token' => Tools::getAdminTokenLite('AdminModules'),
             'chart_js_path' => $this->_path . 'views/js/chart.min.js',
@@ -746,6 +1099,8 @@ class ClickTracker extends Module
     protected function processExportCsv()
     {
         $filters = $this->getLogFilters();
+        $sourceLabels = $this->getSourceLabels();
+        $deviceLabels = $this->getDeviceLabels();
 
         // Discard any buffered back office output
         while (ob_get_level() > 0) {
@@ -770,27 +1125,46 @@ class ClickTracker extends Module
             $this->l('Page Type'),
             $this->l('Element Type'),
             $this->l('Clicked Class'),
+            $this->l('Action'),
             $this->l('Product ID'),
             $this->l('Product Name'),
             $this->l('Category ID'),
+            $this->l('Brand'),
             $this->l('Page URL'),
             $this->l('Page Title'),
+            $this->l('Traffic Source'),
+            'utm_source',
+            'utm_medium',
+            'utm_campaign',
+            $this->l('Referrer'),
+            $this->l('Device'),
         ), ';');
 
         $db = Db::getInstance();
         $result = ClickTrackerLog::queryLogsForExport($filters);
         while ($result && ($log = $db->nextRow($result))) {
+            $source = isset($log['traffic_source']) ? $log['traffic_source'] : null;
+            $device = isset($log['device']) ? $log['device'] : null;
+
             fputcsv($output, array(
                 $log['date_add'],
                 $log['context_type'],
                 $this->csvCell($log['page_type']),
                 $log['element_type'],
                 $this->csvCell($log['clicked_class']),
+                $this->csvCell($this->getActionLabel($log['clicked_class'])),
                 $log['id_product'] ?: '',
                 $this->csvCell($log['product_name']),
                 $log['id_category'] ?: '',
+                $this->csvCell(isset($log['manufacturer_name']) ? $log['manufacturer_name'] : ''),
                 $this->csvCell($log['page_url']),
                 $this->csvCell($log['page_title']),
+                $source !== null && isset($sourceLabels[$source]) ? $sourceLabels[$source] : '',
+                $this->csvCell(isset($log['utm_source']) ? $log['utm_source'] : ''),
+                $this->csvCell(isset($log['utm_medium']) ? $log['utm_medium'] : ''),
+                $this->csvCell(isset($log['utm_campaign']) ? $log['utm_campaign'] : ''),
+                $this->csvCell(isset($log['referrer_host']) ? $log['referrer_host'] : ''),
+                $device !== null && isset($deviceLabels[$device]) ? $deviceLabels[$device] : '',
             ), ';');
         }
 
@@ -825,6 +1199,21 @@ class ClickTracker extends Module
     }
 
     /**
+     * Hook: displayHeader (used up to 1.0.0)
+     * Keeps tracking active if the files are updated before the upgrade has moved the module
+     * to actionFrontControllerSetMedia. Assets registered here are still rendered by the theme.
+     *
+     * @param array $params Hook parameters
+     * @return string
+     */
+    public function hookDisplayHeader($params)
+    {
+        $this->hookActionFrontControllerSetMedia($params);
+
+        return '';
+    }
+
+    /**
      * Hook: actionFrontControllerSetMedia
      * Registers the tracking script and its configuration
      *
@@ -856,7 +1245,11 @@ class ClickTracker extends Module
         $bodyClassesConfig = (string) Configuration::get(self::CONFIG_PREFIX . 'BODY_CLASSES');
         $bodyClasses = array_values(array_filter(array_map('trim', explode("\n", $bodyClassesConfig)), 'strlen'));
 
-        if (!$shouldTrackByPageType && empty($bodyClasses)) {
+        $schemaReady = ClickTrackerLog::isSchemaReady();
+        $firstTouch = $schemaReady && (bool) Configuration::get(self::CONFIG_PREFIX . 'FIRST_TOUCH');
+
+        // First-touch attribution needs the script on every page to record the landing page
+        if (!$shouldTrackByPageType && empty($bodyClasses) && !$firstTouch) {
             return;
         }
 
@@ -867,6 +1260,10 @@ class ClickTracker extends Module
                 $productData = array('id_product' => (int) $product->id);
             }
         }
+
+        // Views are counted only where product clicks are tracked, so the rate is consistent
+        $trackViews = $schemaReady && $productData !== null && $shouldTrackByPageType
+            && (bool) Configuration::get(self::CONFIG_PREFIX . 'TRACK_VIEWS');
 
         Media::addJsDef(array(
             'et_clickTrackerConfig' => array(
@@ -881,6 +1278,8 @@ class ClickTracker extends Module
                 'pageType' => $pageType,
                 'productData' => $productData,
                 'shouldTrackByPageType' => $shouldTrackByPageType,
+                'trackViews' => $trackViews,
+                'firstTouch' => $firstTouch,
             ),
         ));
 

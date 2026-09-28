@@ -20,6 +20,9 @@ if (!defined('_PS_VERSION_')) {
  */
 function upgrade_module_1_1_0($module)
 {
+    // Backfills can take a while on large tables; the script is re-runnable if interrupted
+    @set_time_limit(0);
+
     $db = Db::getInstance();
     $table = _DB_PREFIX_ . 'clicktracker_log';
 

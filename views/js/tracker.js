@@ -30,8 +30,15 @@
             context: 'other',
             pageType: '',
             productData: null,
-            shouldTrackByPageType: false
+            shouldTrackByPageType: false,
+            trackViews: false,
+            firstTouch: false
         },
+
+        /**
+         * sessionStorage key of the landing page (first-touch attribution)
+         */
+        landingKey: 'et_clicktracker_landing',
 
         /**
          * Track if already initialized
@@ -75,6 +82,15 @@
                 return;
             }
 
+            // Independent of click tracking on this page
+            if (this.config.firstTouch) {
+                this.storeLanding();
+            }
+
+            if (this.config.trackViews && this.config.productData) {
+                this.sendView();
+            }
+
             // Check if we should track on this page
             if (!this.shouldTrackOnPage()) {
                 this.log('Tracking disabled for this page');
@@ -86,6 +102,52 @@
 
             this.initialized = true;
             this.log('Initialized with selectors: ' + this.config.classes.join(', '));
+        },
+
+        /**
+         * Remember the first page of the visit (first-touch attribution).
+         * Stored in sessionStorage only: never sent anywhere except with tracked clicks.
+         */
+        storeLanding: function() {
+            try {
+                if (!window.sessionStorage.getItem(this.landingKey)) {
+                    window.sessionStorage.setItem(this.landingKey, JSON.stringify({
+                        url: window.location.href,
+                        referrer: document.referrer || ''
+                    }));
+                }
+            } catch (e) {
+                this.log('sessionStorage not available');
+            }
+        },
+
+        /**
+         * Landing page of the visit, if recorded
+         * @returns {Object|null} {url, referrer}
+         */
+        getLanding: function() {
+            try {
+                var landing = JSON.parse(window.sessionStorage.getItem(this.landingKey) || 'null');
+                if (landing && typeof landing.url === 'string' && typeof landing.referrer === 'string') {
+                    return landing;
+                }
+            } catch (e) {
+                this.log('Landing page not available');
+            }
+
+            return null;
+        },
+
+        /**
+         * Count a product page view (click-through rate)
+         */
+        sendView: function() {
+            this.send({
+                action: 'view',
+                id_product: this.config.productData.id_product,
+                page_url: window.location.href,
+                token: this.config.token
+            });
         },
 
         /**
@@ -154,7 +216,7 @@
                 return;
             }
 
-            this.sendTracking(this.collectData(match.element, match.selector));
+            this.send(this.collectData(match.element, match.selector));
         },
 
         /**
@@ -260,8 +322,17 @@
                 clicked_class: this.getSelectorLabel(selector),
                 element_type: this.getElementType(element),
                 page_url: window.location.href,
+                referrer: document.referrer || '',
                 token: this.config.token
             };
+
+            if (this.config.firstTouch) {
+                var landing = this.getLanding();
+                if (landing) {
+                    data.landing_url = landing.url;
+                    data.landing_referrer = landing.referrer;
+                }
+            }
 
             // Product name and category are resolved server side from the ID
             if (this.config.context === 'product' && this.config.productData) {
@@ -395,7 +466,7 @@
          * in debug mode fetch is used to read the server response.
          * @param {Object} data Tracking data
          */
-        sendTracking: function(data) {
+        send: function(data) {
             var formData = this.buildFormData(data);
 
             try {

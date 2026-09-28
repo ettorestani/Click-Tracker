@@ -24,8 +24,11 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
     /** @var ClickTracker */
     public $module;
 
-    /** @var int Rate limit: maximum requests per time window */
-    const RATE_LIMIT_MAX = 30;
+    /** @var array|null Cached shop hosts */
+    protected $shopHosts = null;
+
+    /** @var int Rate limit: maximum requests (clicks + product views) per IP and time window */
+    const RATE_LIMIT_MAX = 60;
 
     /** @var int Rate limit: time window in seconds */
     const RATE_LIMIT_WINDOW = 60;
@@ -69,11 +72,17 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
             }
 
             require_once _PS_MODULE_DIR_ . 'clicktracker/classes/ClickTrackerLog.php';
+            require_once _PS_MODULE_DIR_ . 'clicktracker/classes/ClickTrackerSource.php';
 
             // Get and validate token
             $token = Tools::getValue('token');
             if (empty($token) || !$this->validateToken($token)) {
                 $this->ajaxResponse(false, 'Invalid token');
+                return;
+            }
+
+            if (Tools::getValue('action') === 'view') {
+                $this->processProductView();
                 return;
             }
 
@@ -91,7 +100,8 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
             }
 
             // Only selectors currently configured in the back office are accepted
-            if (!in_array($clickedClass, $this->module->getTrackedSelectorLabels(), true)) {
+            $selectorConfig = $this->module->getSelectorConfig();
+            if (!isset($selectorConfig[$clickedClass])) {
                 $this->ajaxResponse(false, 'Unknown selector');
                 return;
             }
@@ -101,8 +111,10 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
                 $context = ClickTrackerLog::CONTEXT_OTHER;
             }
 
-            // Validate element type
-            if (!ClickTrackerLog::isValidElementType($elementType)) {
+            // Element type forced in the configuration wins over client-side detection
+            if (!empty($selectorConfig[$clickedClass]['type'])) {
+                $elementType = $selectorConfig[$clickedClass]['type'];
+            } elseif (!ClickTrackerLog::isValidElementType($elementType)) {
                 $elementType = ClickTrackerLog::ELEMENT_OTHER;
             }
 
@@ -112,63 +124,163 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
                 return;
             }
 
-            // Create log entry
-            $log = new ClickTrackerLog();
-            $log->id_shop = (int) $this->context->shop->id;
-            $log->context_type = $context;
-            $log->page_type = preg_match('/^[a-zA-Z0-9_\-]{1,64}$/', (string) $pageType) ? $pageType : null;
-            $log->clicked_class = $this->cleanInputString($clickedClass, 255);
-            $log->element_type = $elementType;
-            $log->page_url = $this->truncate($pageUrl, 500);
-            $log->page_path = $this->truncate(ClickTrackerLog::normalizeUrl($pageUrl), 500);
-            $log->date_add = date('Y-m-d H:i:s');
+            $log = array(
+                'id_shop' => (int) $this->context->shop->id,
+                'context_type' => $context,
+                'page_type' => preg_match('/^[a-zA-Z0-9_\-]{1,64}$/', (string) $pageType) ? $pageType : null,
+                'clicked_class' => $this->cleanInputString($clickedClass, 255),
+                'element_type' => $elementType,
+                'page_url' => $this->truncate($pageUrl, 500),
+                'page_path' => $this->truncate(ClickTrackerLog::normalizeUrl($pageUrl), 500),
+                'device' => $this->getDevice(),
+                'date_add' => date('Y-m-d H:i:s'),
+            );
 
             if ($context === ClickTrackerLog::CONTEXT_PRODUCT) {
                 // Product data is read from the catalog (default language), never trusted from the client
                 $product = new Product((int) Tools::getValue('id_product'), false, (int) Configuration::get('PS_LANG_DEFAULT'), (int) $this->context->shop->id);
-                if (!Validate::isLoadedObject($product)) {
-                    $this->ajaxResponse(false, 'Invalid product');
-                    return;
-                }
-
-                $log->id_product = (int) $product->id;
-                $log->product_name = $this->cleanInputString($product->name, 255);
-                $log->id_category = (int) $product->id_category_default ?: null;
-            } else {
-                $pageTitle = Tools::getValue('page_title');
-                if (!empty($pageTitle)) {
-                    $log->page_title = $this->cleanInputString($pageTitle, 255);
+                if (Validate::isLoadedObject($product)) {
+                    $log['id_product'] = (int) $product->id;
+                    $log['product_name'] = $this->cleanInputString($product->name, 255);
+                    $log['id_category'] = (int) $product->id_category_default ?: null;
+                    $log['id_manufacturer'] = (int) $product->id_manufacturer ?: null;
+                } else {
+                    // Unknown product (e.g. deleted meanwhile): keep the click without product data
+                    $log['context_type'] = ClickTrackerLog::CONTEXT_OTHER;
                 }
             }
 
-            // Save to database
-            if ($log->save()) {
+            if ($log['context_type'] !== ClickTrackerLog::CONTEXT_PRODUCT) {
+                $pageTitle = Tools::getValue('page_title');
+                if (!empty($pageTitle)) {
+                    $log['page_title'] = $this->cleanInputString($pageTitle, 255);
+                }
+            }
+
+            $log = array_merge($log, $this->getTrafficSource($pageUrl));
+
+            if (ClickTrackerLog::insertLog($log)) {
                 $this->ajaxResponse(true, 'Click tracked');
             } else {
                 $this->ajaxResponse(false, 'Failed to save');
             }
         } catch (Exception $e) {
-            // Log error silently in debug mode
-            if (Configuration::get('CLICKTRACKER_DEBUG')) {
-                PrestaShopLogger::addLog(
-                    'ClickTracker error: ' . $e->getMessage(),
-                    3,
-                    null,
-                    'ClickTrackerLog',
-                    null,
-                    true
-                );
+            $this->handleError($e);
+        } catch (Throwable $e) {
+            // PHP 7+ errors (TypeError...): never break the page, always answer JSON
+            $this->handleError($e);
+        }
+    }
+
+    /**
+     * Log an unexpected error (debug mode only) and answer with a generic message
+     *
+     * @param Exception|Throwable $e
+     */
+    protected function handleError($e)
+    {
+        if (Configuration::get('CLICKTRACKER_DEBUG')) {
+            PrestaShopLogger::addLog('ClickTracker error: ' . $e->getMessage(), 3, null, 'ClickTrackerLog', null, true);
+        }
+        $this->ajaxResponse(false, 'Server error');
+    }
+
+    /**
+     * Count a product page view (used for the click-through rate)
+     */
+    protected function processProductView()
+    {
+        if (!Configuration::get('CLICKTRACKER_TRACK_VIEWS')) {
+            $this->ajaxResponse(false, 'View tracking disabled');
+            return;
+        }
+
+        $pageUrl = trim((string) Tools::getValue('page_url'));
+        if (Tools::strlen($pageUrl) > 2000 || !$this->isShopUrl($pageUrl)) {
+            $this->ajaxResponse(false, 'Invalid URL');
+            return;
+        }
+
+        $idProduct = (int) Tools::getValue('id_product');
+        if ($idProduct <= 0 || !Product::existsInDatabase($idProduct, 'product')) {
+            $this->ajaxResponse(false, 'Invalid product');
+            return;
+        }
+
+        if (ClickTrackerLog::addProductView((int) $this->context->shop->id, $idProduct)) {
+            $this->ajaxResponse(true, 'View tracked');
+        } else {
+            $this->ajaxResponse(false, 'Failed to save');
+        }
+    }
+
+    /**
+     * Traffic source of the click: from the current page, or from the landing page
+     * of the session when first-touch attribution is enabled
+     *
+     * @param string $pageUrl Validated page URL
+     * @return array traffic_source, utm_*, referrer_host
+     */
+    protected function getTrafficSource($pageUrl)
+    {
+        $url = $pageUrl;
+        // Requests from a cached pre-1.2.0 script carry no referrer: source is then unknown, not direct
+        $referrer = Tools::getIsset('referrer') ? (string) Tools::getValue('referrer') : null;
+
+        if (Configuration::get('CLICKTRACKER_FIRST_TOUCH')) {
+            $landingUrl = trim((string) Tools::getValue('landing_url'));
+            if ($landingUrl !== '' && Tools::strlen($landingUrl) <= 2000 && $this->isShopUrl($landingUrl)) {
+                $url = $landingUrl;
+                $referrer = (string) Tools::getValue('landing_referrer');
             }
-            $this->ajaxResponse(false, 'Server error');
+        }
+
+        if ($referrer !== null && Tools::strlen($referrer) > 2000) {
+            $referrer = null;
+        }
+
+        return ClickTrackerSource::classify($url, $referrer, $this->getShopHosts());
+    }
+
+    /**
+     * Device type from the user agent (PrestaShop Mobile_Detect)
+     *
+     * @return string
+     */
+    protected function getDevice()
+    {
+        switch ($this->context->getDevice()) {
+            case Context::DEVICE_MOBILE:
+                return ClickTrackerLog::DEVICE_MOBILE;
+            case Context::DEVICE_TABLET:
+                return ClickTrackerLog::DEVICE_TABLET;
+            default:
+                return ClickTrackerLog::DEVICE_DESKTOP;
         }
     }
 
     /**
      * Check rate limiting per client IP (stored hashed, never in clear)
      *
-     * @return bool True if within rate limit, false if exceeded
+     * @return bool True if within rate limit (or if the limit cannot be checked), false if exceeded
      */
     protected function checkRateLimit()
+    {
+        // Fail open: a missing table (files deployed before the upgrade) or a database hiccup
+        // must never stop click tracking
+        try {
+            return $this->incrementRateCounter() <= self::RATE_LIMIT_MAX;
+        } catch (Exception $e) {
+            return true;
+        }
+    }
+
+    /**
+     * Increment and return the request counter of the client IP for the current window
+     *
+     * @return int Requests in the current window (0 if the counter could not be read)
+     */
+    protected function incrementRateCounter()
     {
         $db = Db::getInstance();
         $table = _DB_PREFIX_ . 'clicktracker_rate';
@@ -188,9 +300,7 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
             $db->execute('DELETE FROM `' . $table . '` WHERE `window_start` < ' . (int) ($now - 3600));
         }
 
-        $hits = (int) $db->getValue('SELECT `hits` FROM `' . $table . '` WHERE `ip_hash` = "' . pSQL($ipHash) . '"', false);
-
-        return $hits <= self::RATE_LIMIT_MAX;
+        return (int) $db->getValue('SELECT `hits` FROM `' . $table . '` WHERE `ip_hash` = "' . pSQL($ipHash) . '"', false);
     }
 
     /**
@@ -247,6 +357,10 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
      */
     protected function getShopHosts()
     {
+        if ($this->shopHosts !== null) {
+            return $this->shopHosts;
+        }
+
         $hosts = array();
         $rows = Db::getInstance()->executeS('SELECT `domain`, `domain_ssl` FROM `' . _DB_PREFIX_ . 'shop_url`
             WHERE `id_shop` = ' . (int) $this->context->shop->id);
@@ -264,7 +378,9 @@ class ClickTrackerAjaxModuleFrontController extends ModuleFrontController
             }
         }
 
-        return array_unique($hosts);
+        $this->shopHosts = array_values(array_unique($hosts));
+
+        return $this->shopHosts;
     }
 
     /**

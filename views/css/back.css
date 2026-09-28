@@ -327,3 +327,32 @@
 .clicktracker-filters input[type="date"] {
     padding: 6px 10px;
 }
+
+/* Period comparison */
+.clicktracker-card-delta {
+    margin-top: 6px;
+    font-size: 12px;
+}
+
+.clicktracker-delta {
+    font-weight: 600;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.clicktracker-delta-up {
+    color: #2e8b57;
+}
+
+.clicktracker-delta-down {
+    color: #c0392b;
+}
+
+.clicktracker-delta-flat {
+    color: #6c757d;
+}
+
+.clicktracker-compare-note {
+    display: inline-block;
+    margin: 0 0 0 15px;
+}

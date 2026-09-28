@@ -13,11 +13,9 @@
 
         <div class="clicktracker-panel-heading-action">
             <form method="post" action="{$moduleLink|escape:'htmlall':'UTF-8'}" class="form-inline pull-right">
-                <input type="hidden" name="filter_context" value="{$filters.context_type|escape:'htmlall':'UTF-8'}">
-                <input type="hidden" name="filter_element" value="{$filters.element_type|escape:'htmlall':'UTF-8'}">
-                <input type="hidden" name="filter_date_from" value="{$filters.date_from|escape:'htmlall':'UTF-8'}">
-                <input type="hidden" name="filter_date_to" value="{$filters.date_to|escape:'htmlall':'UTF-8'}">
-                <input type="hidden" name="filter_search" value="{$filters.search|escape:'htmlall':'UTF-8'}">
+                {foreach from=$filter_params key=param_name item=param_value}
+                    <input type="hidden" name="{$param_name|escape:'htmlall':'UTF-8'}" value="{$param_value|escape:'htmlall':'UTF-8'}">
+                {/foreach}
                 <button type="submit" name="exportCsv" class="btn btn-default">
                     <i class="icon-download"></i> {l s='Export CSV' mod='clicktracker'}
                 </button>
@@ -57,6 +55,32 @@
                         </select>
                     </div>
                 </div>
+
+                {if $schema_ready}
+                    <div class="col-md-2">
+                        <div class="form-group">
+                            <label>{l s='Source' mod='clicktracker'}</label>
+                            <select name="filter_source" class="form-control">
+                                <option value="">{l s='All' mod='clicktracker'}</option>
+                                {foreach from=$source_types key=key item=label}
+                                    <option value="{$key|escape:'htmlall':'UTF-8'}"{if $filters.traffic_source == $key} selected{/if}>{$label|escape:'htmlall':'UTF-8'}</option>
+                                {/foreach}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="col-md-2">
+                        <div class="form-group">
+                            <label>{l s='Device' mod='clicktracker'}</label>
+                            <select name="filter_device" class="form-control">
+                                <option value="">{l s='All' mod='clicktracker'}</option>
+                                {foreach from=$device_types key=key item=label}
+                                    <option value="{$key|escape:'htmlall':'UTF-8'}"{if $filters.device == $key} selected{/if}>{$label|escape:'htmlall':'UTF-8'}</option>
+                                {/foreach}
+                            </select>
+                        </div>
+                    </div>
+                {/if}
 
                 <div class="col-md-2">
                     <div class="form-group">
@@ -98,11 +122,9 @@
 
     {* Bulk actions form *}
     <form method="post" action="{$moduleLink|escape:'htmlall':'UTF-8'}" id="logsForm">
-        <input type="hidden" name="filter_context" value="{$filters.context_type|escape:'htmlall':'UTF-8'}">
-        <input type="hidden" name="filter_element" value="{$filters.element_type|escape:'htmlall':'UTF-8'}">
-        <input type="hidden" name="filter_date_from" value="{$filters.date_from|escape:'htmlall':'UTF-8'}">
-        <input type="hidden" name="filter_date_to" value="{$filters.date_to|escape:'htmlall':'UTF-8'}">
-        <input type="hidden" name="filter_search" value="{$filters.search|escape:'htmlall':'UTF-8'}">
+        {foreach from=$filter_params key=param_name item=param_value}
+            <input type="hidden" name="{$param_name|escape:'htmlall':'UTF-8'}" value="{$param_value|escape:'htmlall':'UTF-8'}">
+        {/foreach}
 
         <div class="table-responsive">
             <table class="table table-striped table-hover">
@@ -115,7 +137,8 @@
                         <th width="80">{l s='Context' mod='clicktracker'}</th>
                         <th width="100">{l s='Element' mod='clicktracker'}</th>
                         <th>{l s='Product/Page' mod='clicktracker'}</th>
-                        <th width="120">{l s='Class' mod='clicktracker'}</th>
+                        <th width="160">{l s='Action' mod='clicktracker'}</th>
+                        <th width="150">{l s='Source / Device' mod='clicktracker'}</th>
                         <th width="150">{l s='Date' mod='clicktracker'}</th>
                         <th width="100" class="text-center">{l s='Actions' mod='clicktracker'}</th>
                     </tr>
@@ -156,7 +179,15 @@
                                         {if $log.page_type}<br><small class="text-muted">{$log.page_type|escape:'htmlall':'UTF-8'}</small>{/if}
                                     {/if}
                                 </td>
-                                <td><code>{$log.clicked_class|escape:'htmlall':'UTF-8'}</code></td>
+                                <td>
+                                    {if $log.action_label != $log.clicked_class}<strong>{$log.action_label|escape:'htmlall':'UTF-8'}</strong><br>{/if}
+                                    <code>{$log.clicked_class|escape:'htmlall':'UTF-8'}</code>
+                                </td>
+                                <td>
+                                    {if $log.source_label}{$log.source_label|escape:'htmlall':'UTF-8'}{else}<span class="text-muted">-</span>{/if}
+                                    {if isset($log.utm_campaign) && $log.utm_campaign}<br><small class="text-muted">{$log.utm_campaign|truncate:30:'...'|escape:'htmlall':'UTF-8'}</small>{/if}
+                                    {if $log.device_label}<br><small class="text-muted">{$log.device_label|escape:'htmlall':'UTF-8'}</small>{/if}
+                                </td>
                                 <td>{$log.date_add|escape:'htmlall':'UTF-8'}</td>
                                 <td class="text-center">
                                     {if $log.has_safe_url}
@@ -175,7 +206,7 @@
                         {/foreach}
                     {else}
                         <tr>
-                            <td colspan="8" class="text-center">
+                            <td colspan="9" class="text-center">
                                 <p class="text-muted">{l s='No click logs found.' mod='clicktracker'}</p>
                             </td>
                         </tr>

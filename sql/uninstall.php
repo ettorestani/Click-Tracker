@@ -16,9 +16,10 @@ $sql = array();
 // Rate limiting data is transient: always drop it
 $sql[] = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'clicktracker_rate`;';
 
-// Click logs are dropped only when explicitly requested in the configuration
+// Tracked data (clicks and product views) is dropped only when explicitly requested in the configuration
 if (!empty($deleteLogs)) {
     $sql[] = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'clicktracker_log`;';
+    $sql[] = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'clicktracker_product_view`;';
 }
 
 foreach ($sql as $query) {

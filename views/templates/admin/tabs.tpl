@@ -10,7 +10,7 @@
     <ul class="nav nav-tabs">
         {foreach from=$tabs key=tabKey item=tab}
             <li class="{if $activeTab == $tabKey}active{/if}">
-                <a href="{$moduleLink nofilter}&section={$tabKey|escape:'htmlall':'UTF-8'}">
+                <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&amp;section={$tabKey|escape:'url'}">
                     <i class="{$tab.icon|escape:'htmlall':'UTF-8'}"></i>
                     {$tab.title|escape:'htmlall':'UTF-8'}
                 </a>

@@ -2,7 +2,7 @@
 <module>
     <name>clicktracker</name>
     <displayName><![CDATA[Click Tracker]]></displayName>
-    <version><![CDATA[1.1.0]]></version>
+    <version><![CDATA[1.2.0]]></version>
     <description><![CDATA[Advanced click tracking system to monitor user interactions with specific page elements (WhatsApp, phone buttons, CTAs)]]></description>
     <author><![CDATA[Ettore Stani]]></author>
     <tab><![CDATA[analytics_stats]]></tab>
