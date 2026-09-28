@@ -13,8 +13,13 @@ if (!defined('_PS_VERSION_')) {
 
 $sql = array();
 
-// Drop main tracking log table
-$sql[] = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'clicktracker_log`;';
+// Rate limiting data is transient: always drop it
+$sql[] = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'clicktracker_rate`;';
+
+// Click logs are dropped only when explicitly requested in the configuration
+if (!empty($deleteLogs)) {
+    $sql[] = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . 'clicktracker_log`;';
+}
 
 foreach ($sql as $query) {
     if (Db::getInstance()->execute($query) == false) {

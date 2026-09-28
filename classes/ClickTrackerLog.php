@@ -14,15 +14,22 @@ if (!defined('_PS_VERSION_')) {
 /**
  * Class ClickTrackerLog
  *
- * ObjectModel for storing click tracking data
+ * ObjectModel for storing click tracking data.
+ * Text values are stored raw and must be escaped on output.
  */
 class ClickTrackerLog extends ObjectModel
 {
     /** @var int Log ID */
     public $id_clicktracker_log;
 
-    /** @var string Context type: 'product' or 'cms' */
+    /** @var int Shop ID */
+    public $id_shop;
+
+    /** @var string Context type: 'product', 'cms', 'category', 'home', 'other' */
     public $context_type;
+
+    /** @var string|null PrestaShop page name (php_self or module-xxx-yyy) */
+    public $page_type;
 
     /** @var int|null Product ID (only for product context) */
     public $id_product;
@@ -33,13 +40,16 @@ class ClickTrackerLog extends ObjectModel
     /** @var int|null Category ID (only for product context) */
     public $id_category;
 
-    /** @var string Page URL where click occurred */
+    /** @var string Full page URL where click occurred */
     public $page_url;
 
-    /** @var string|null Page title (only for CMS context) */
+    /** @var string Page URL without query string and fragment */
+    public $page_path;
+
+    /** @var string|null Page title (non-product contexts) */
     public $page_title;
 
-    /** @var string CSS class of clicked element */
+    /** @var string Configured selector that matched the clicked element */
     public $clicked_class;
 
     /** @var string Element type: 'whatsapp', 'phone', 'maps', 'other' */
@@ -55,11 +65,22 @@ class ClickTrackerLog extends ObjectModel
         'table' => 'clicktracker_log',
         'primary' => 'id_clicktracker_log',
         'fields' => array(
+            'id_shop' => array(
+                'type' => self::TYPE_INT,
+                'validate' => 'isUnsignedId',
+                'required' => true,
+            ),
             'context_type' => array(
                 'type' => self::TYPE_STRING,
                 'validate' => 'isGenericName',
                 'required' => true,
                 'size' => 20,
+            ),
+            'page_type' => array(
+                'type' => self::TYPE_STRING,
+                'validate' => 'isGenericName',
+                'size' => 64,
+                'allow_null' => true,
             ),
             'id_product' => array(
                 'type' => self::TYPE_INT,
@@ -68,7 +89,7 @@ class ClickTrackerLog extends ObjectModel
             ),
             'product_name' => array(
                 'type' => self::TYPE_STRING,
-                'validate' => 'isGenericName',
+                'validate' => 'isString',
                 'size' => 255,
                 'allow_null' => true,
             ),
@@ -79,21 +100,27 @@ class ClickTrackerLog extends ObjectModel
             ),
             'page_url' => array(
                 'type' => self::TYPE_STRING,
-                'validate' => 'isUrl',
+                'validate' => 'isString',
                 'required' => true,
                 'size' => 500,
             ),
+            'page_path' => array(
+                'type' => self::TYPE_STRING,
+                'validate' => 'isString',
+                'size' => 500,
+                'allow_null' => true,
+            ),
             'page_title' => array(
                 'type' => self::TYPE_STRING,
-                'validate' => 'isGenericName',
+                'validate' => 'isString',
                 'size' => 255,
                 'allow_null' => true,
             ),
             'clicked_class' => array(
                 'type' => self::TYPE_STRING,
-                'validate' => 'isGenericName',
+                'validate' => 'isString',
                 'required' => true,
-                'size' => 100,
+                'size' => 255,
             ),
             'element_type' => array(
                 'type' => self::TYPE_STRING,
@@ -114,6 +141,9 @@ class ClickTrackerLog extends ObjectModel
      */
     const CONTEXT_PRODUCT = 'product';
     const CONTEXT_CMS = 'cms';
+    const CONTEXT_CATEGORY = 'category';
+    const CONTEXT_HOME = 'home';
+    const CONTEXT_OTHER = 'other';
 
     /**
      * Valid element types
@@ -122,67 +152,6 @@ class ClickTrackerLog extends ObjectModel
     const ELEMENT_PHONE = 'phone';
     const ELEMENT_MAPS = 'maps';
     const ELEMENT_OTHER = 'other';
-
-    /**
-     * Get clicks by product ID
-     *
-     * @param int $id_product Product ID
-     * @param int $limit Maximum number of results
-     * @return array Array of click logs
-     */
-    public static function getClicksByProduct($id_product, $limit = 100)
-    {
-        $id_product = (int) $id_product;
-
-        return Db::getInstance()->executeS('
-            SELECT * FROM `' . _DB_PREFIX_ . 'clicktracker_log`
-            WHERE `id_product` = ' . $id_product . '
-            ORDER BY `date_add` DESC
-            LIMIT ' . (int) $limit
-        );
-    }
-
-    /**
-     * Get clicks by date range
-     *
-     * @param string $start Start date (Y-m-d format)
-     * @param string $end End date (Y-m-d format)
-     * @param string|null $context Filter by context type
-     * @return array Array of click logs
-     */
-    public static function getClicksByDateRange($start, $end, $context = null)
-    {
-        $sql = new DbQuery();
-        $sql->select('*');
-        $sql->from('clicktracker_log');
-        $sql->where('`date_add` >= "' . pSQL($start) . ' 00:00:00"');
-        $sql->where('`date_add` <= "' . pSQL($end) . ' 23:59:59"');
-
-        if ($context !== null) {
-            $sql->where('`context_type` = "' . pSQL($context) . '"');
-        }
-
-        $sql->orderBy('`date_add` DESC');
-
-        return Db::getInstance()->executeS($sql);
-    }
-
-    /**
-     * Get clicks by element type
-     *
-     * @param string $type Element type
-     * @param int $limit Maximum number of results
-     * @return array Array of click logs
-     */
-    public static function getClicksByElementType($type, $limit = 100)
-    {
-        return Db::getInstance()->executeS('
-            SELECT * FROM `' . _DB_PREFIX_ . 'clicktracker_log`
-            WHERE `element_type` = "' . pSQL($type) . '"
-            ORDER BY `date_add` DESC
-            LIMIT ' . (int) $limit
-        );
-    }
 
     /**
      * Get total clicks count with optional filters
@@ -195,55 +164,55 @@ class ClickTrackerLog extends ObjectModel
         $sql = new DbQuery();
         $sql->select('COUNT(*)');
         $sql->from('clicktracker_log');
+        $sql->where(self::getShopWhere());
 
-        if (!empty($filters['context_type'])) {
-            $sql->where('`context_type` = "' . pSQL($filters['context_type']) . '"');
-        }
-
-        if (!empty($filters['element_type'])) {
-            $sql->where('`element_type` = "' . pSQL($filters['element_type']) . '"');
-        }
-
-        if (!empty($filters['date_from'])) {
-            $sql->where('`date_add` >= "' . pSQL($filters['date_from']) . ' 00:00:00"');
-        }
-
-        if (!empty($filters['date_to'])) {
-            $sql->where('`date_add` <= "' . pSQL($filters['date_to']) . ' 23:59:59"');
+        foreach (self::buildFilterWhere($filters) as $condition) {
+            $sql->where($condition);
         }
 
         return (int) Db::getInstance()->getValue($sql);
     }
 
     /**
-     * Get clicks grouped by date for charts
+     * Get clicks grouped by date for charts, including periods without clicks
      *
-     * @param string $start Start date
-     * @param string $end End date
-     * @param string $groupBy Group by: 'day', 'week', 'month'
-     * @return array Array with date => count
+     * @param string $start Start date (Y-m-d)
+     * @param string $end End date (Y-m-d)
+     * @param string $groupBy Group by: 'day' or 'month'
+     * @return array Ordered array of date_group => total
      */
     public static function getClicksGroupedByDate($start, $end, $groupBy = 'day')
     {
-        switch ($groupBy) {
-            case 'week':
-                $dateFormat = '%Y-%u';
-                break;
-            case 'month':
-                $dateFormat = '%Y-%m';
-                break;
-            default:
-                $dateFormat = '%Y-%m-%d';
-        }
+        $dateFormat = $groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d';
 
-        return Db::getInstance()->executeS('
+        $rows = Db::getInstance()->executeS('
             SELECT DATE_FORMAT(`date_add`, "' . $dateFormat . '") as date_group, COUNT(*) as total
             FROM `' . _DB_PREFIX_ . 'clicktracker_log`
-            WHERE `date_add` >= "' . pSQL($start) . ' 00:00:00"
-            AND `date_add` <= "' . pSQL($end) . ' 23:59:59"
+            WHERE ' . self::getShopWhere() . '
+            AND ' . implode(' AND ', self::buildDateWhere($start, $end)) . '
             GROUP BY date_group
             ORDER BY date_group ASC
         ');
+
+        $totals = array();
+        foreach ((array) $rows as $row) {
+            $totals[$row['date_group']] = (int) $row['total'];
+        }
+
+        // Fill the gaps so the chart shows periods with zero clicks
+        $series = array();
+        $phpFormat = $groupBy === 'month' ? 'Y-m' : 'Y-m-d';
+        $step = $groupBy === 'month' ? '+1 month' : '+1 day';
+        $cursor = strtotime($groupBy === 'month' ? date('Y-m-01', strtotime($start)) : $start);
+        $last = strtotime($end);
+
+        while ($cursor !== false && $cursor <= $last) {
+            $key = date($phpFormat, $cursor);
+            $series[$key] = isset($totals[$key]) ? $totals[$key] : 0;
+            $cursor = strtotime($step, $cursor);
+        }
+
+        return $series;
     }
 
     /**
@@ -258,13 +227,10 @@ class ClickTrackerLog extends ObjectModel
         $sql = new DbQuery();
         $sql->select('`element_type`, COUNT(*) as total');
         $sql->from('clicktracker_log');
+        $sql->where(self::getShopWhere());
 
-        if ($start !== null) {
-            $sql->where('`date_add` >= "' . pSQL($start) . ' 00:00:00"');
-        }
-
-        if ($end !== null) {
-            $sql->where('`date_add` <= "' . pSQL($end) . ' 23:59:59"');
+        foreach (self::buildDateWhere($start, $end) as $condition) {
+            $sql->where($condition);
         }
 
         $sql->groupBy('`element_type`');
@@ -285,16 +251,14 @@ class ClickTrackerLog extends ObjectModel
         $sql = new DbQuery();
         $sql->select('`context_type`, COUNT(*) as total');
         $sql->from('clicktracker_log');
+        $sql->where(self::getShopWhere());
 
-        if ($start !== null) {
-            $sql->where('`date_add` >= "' . pSQL($start) . ' 00:00:00"');
-        }
-
-        if ($end !== null) {
-            $sql->where('`date_add` <= "' . pSQL($end) . ' 23:59:59"');
+        foreach (self::buildDateWhere($start, $end) as $condition) {
+            $sql->where($condition);
         }
 
         $sql->groupBy('`context_type`');
+        $sql->orderBy('total DESC');
 
         return Db::getInstance()->executeS($sql);
     }
@@ -309,24 +273,19 @@ class ClickTrackerLog extends ObjectModel
      */
     public static function getTopProducts($limit = 10, $start = null, $end = null)
     {
-        $where = array();
-        $where[] = '`context_type` = "product"';
-        $where[] = '`id_product` IS NOT NULL';
-
-        if ($start !== null) {
-            $where[] = '`date_add` >= "' . pSQL($start) . ' 00:00:00"';
-        }
-
-        if ($end !== null) {
-            $where[] = '`date_add` <= "' . pSQL($end) . ' 23:59:59"';
-        }
-
-        $whereClause = implode(' AND ', $where);
+        $where = array_merge(
+            array(
+                self::getShopWhere(),
+                '`context_type` = "' . self::CONTEXT_PRODUCT . '"',
+                '`id_product` IS NOT NULL',
+            ),
+            self::buildDateWhere($start, $end)
+        );
 
         return Db::getInstance()->executeS('
-            SELECT `id_product`, `product_name`, COUNT(*) as total_clicks
+            SELECT `id_product`, MAX(`product_name`) as product_name, COUNT(*) as total_clicks
             FROM `' . _DB_PREFIX_ . 'clicktracker_log`
-            WHERE ' . $whereClause . '
+            WHERE ' . implode(' AND ', $where) . '
             GROUP BY `id_product`
             ORDER BY total_clicks DESC
             LIMIT ' . (int) $limit
@@ -334,7 +293,7 @@ class ClickTrackerLog extends ObjectModel
     }
 
     /**
-     * Get top clicked CMS/blog pages
+     * Get top clicked non-product pages, grouped by normalized URL
      *
      * @param int $limit Maximum number of results
      * @param string|null $start Start date (optional)
@@ -343,46 +302,22 @@ class ClickTrackerLog extends ObjectModel
      */
     public static function getTopPages($limit = 10, $start = null, $end = null)
     {
-        $where = array();
-        $where[] = '`context_type` = "cms"';
-
-        if ($start !== null) {
-            $where[] = '`date_add` >= "' . pSQL($start) . ' 00:00:00"';
-        }
-
-        if ($end !== null) {
-            $where[] = '`date_add` <= "' . pSQL($end) . ' 23:59:59"';
-        }
-
-        $whereClause = implode(' AND ', $where);
+        $where = array_merge(
+            array(
+                self::getShopWhere(),
+                '`context_type` != "' . self::CONTEXT_PRODUCT . '"',
+            ),
+            self::buildDateWhere($start, $end)
+        );
 
         return Db::getInstance()->executeS('
-            SELECT `page_url`, `page_title`, COUNT(*) as total_clicks
+            SELECT `page_path` as page_url, MAX(`page_title`) as page_title, COUNT(*) as total_clicks
             FROM `' . _DB_PREFIX_ . 'clicktracker_log`
-            WHERE ' . $whereClause . '
-            GROUP BY `page_url`
+            WHERE ' . implode(' AND ', $where) . '
+            GROUP BY `page_path`
             ORDER BY total_clicks DESC
             LIMIT ' . (int) $limit
         );
-    }
-
-    /**
-     * Delete old log entries
-     *
-     * @param int $days Delete entries older than this many days
-     * @return bool Success status
-     */
-    public static function deleteOldLogs($days)
-    {
-        $days = (int) $days;
-        if ($days < 1) {
-            return false;
-        }
-
-        return Db::getInstance()->execute('
-            DELETE FROM `' . _DB_PREFIX_ . 'clicktracker_log`
-            WHERE `date_add` < DATE_SUB(NOW(), INTERVAL ' . $days . ' DAY)
-        ');
     }
 
     /**
@@ -410,31 +345,8 @@ class ClickTrackerLog extends ObjectModel
             $orderBy = 'date_add';
         }
 
-        // Build base SQL for filters
-        $where = array();
-
-        if (!empty($filters['context_type'])) {
-            $where[] = '`context_type` = "' . pSQL($filters['context_type']) . '"';
-        }
-
-        if (!empty($filters['element_type'])) {
-            $where[] = '`element_type` = "' . pSQL($filters['element_type']) . '"';
-        }
-
-        if (!empty($filters['date_from'])) {
-            $where[] = '`date_add` >= "' . pSQL($filters['date_from']) . ' 00:00:00"';
-        }
-
-        if (!empty($filters['date_to'])) {
-            $where[] = '`date_add` <= "' . pSQL($filters['date_to']) . ' 23:59:59"';
-        }
-
-        if (!empty($filters['search'])) {
-            $search = pSQL($filters['search']);
-            $where[] = '(`product_name` LIKE "%' . $search . '%" OR `page_url` LIKE "%' . $search . '%" OR `page_title` LIKE "%' . $search . '%")';
-        }
-
-        $whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
+        $where = array_merge(array(self::getShopWhere()), self::buildFilterWhere($filters));
+        $whereClause = 'WHERE ' . implode(' AND ', $where);
 
         // Get total count
         $total = (int) Db::getInstance()->getValue('
@@ -450,50 +362,34 @@ class ClickTrackerLog extends ObjectModel
         );
 
         return array(
-            'items' => $items,
+            'items' => $items ? $items : array(),
             'total' => $total,
             'page' => $page,
             'per_page' => $perPage,
-            'total_pages' => ceil($total / $perPage),
+            'total_pages' => (int) ceil($total / $perPage),
         );
     }
 
     /**
-     * Get all logs for export with filters
+     * Run the export query and return an unbuffered result to iterate with Db::nextRow()
      *
      * @param array $filters Optional filters
-     * @return array Array of all matching logs
+     * @return mixed Query result resource
      */
-    public static function getLogsForExport($filters = array())
+    public static function queryLogsForExport($filters = array())
     {
         $sql = new DbQuery();
         $sql->select('*');
         $sql->from('clicktracker_log');
+        $sql->where(self::getShopWhere());
 
-        if (!empty($filters['context_type'])) {
-            $sql->where('`context_type` = "' . pSQL($filters['context_type']) . '"');
-        }
-
-        if (!empty($filters['element_type'])) {
-            $sql->where('`element_type` = "' . pSQL($filters['element_type']) . '"');
-        }
-
-        if (!empty($filters['date_from'])) {
-            $sql->where('`date_add` >= "' . pSQL($filters['date_from']) . ' 00:00:00"');
-        }
-
-        if (!empty($filters['date_to'])) {
-            $sql->where('`date_add` <= "' . pSQL($filters['date_to']) . ' 23:59:59"');
-        }
-
-        if (!empty($filters['search'])) {
-            $search = pSQL($filters['search']);
-            $sql->where('(`product_name` LIKE "%' . $search . '%" OR `page_url` LIKE "%' . $search . '%" OR `page_title` LIKE "%' . $search . '%")');
+        foreach (self::buildFilterWhere($filters) as $condition) {
+            $sql->where($condition);
         }
 
         $sql->orderBy('`date_add` DESC');
 
-        return Db::getInstance()->executeS($sql);
+        return Db::getInstance()->query($sql);
     }
 
     /**
@@ -504,7 +400,13 @@ class ClickTrackerLog extends ObjectModel
      */
     public static function isValidContextType($context)
     {
-        return in_array($context, array(self::CONTEXT_PRODUCT, self::CONTEXT_CMS));
+        return in_array($context, array(
+            self::CONTEXT_PRODUCT,
+            self::CONTEXT_CMS,
+            self::CONTEXT_CATEGORY,
+            self::CONTEXT_HOME,
+            self::CONTEXT_OTHER,
+        ), true);
     }
 
     /**
@@ -520,7 +422,7 @@ class ClickTrackerLog extends ObjectModel
             self::ELEMENT_PHONE,
             self::ELEMENT_MAPS,
             self::ELEMENT_OTHER,
-        ));
+        ), true);
     }
 
     /**
@@ -532,25 +434,9 @@ class ClickTrackerLog extends ObjectModel
      */
     public static function getMostClickedElementType($start = null, $end = null)
     {
-        $sql = 'SELECT `element_type`, COUNT(*) as total FROM `' . _DB_PREFIX_ . 'clicktracker_log`';
+        $rows = self::getClicksGroupedByElementType($start, $end);
 
-        $where = array();
-        if ($start !== null) {
-            $where[] = '`date_add` >= "' . pSQL($start) . ' 00:00:00"';
-        }
-        if ($end !== null) {
-            $where[] = '`date_add` <= "' . pSQL($end) . ' 23:59:59"';
-        }
-
-        if (!empty($where)) {
-            $sql .= ' WHERE ' . implode(' AND ', $where);
-        }
-
-        $sql .= ' GROUP BY `element_type` ORDER BY total DESC';
-
-        $result = Db::getInstance()->getRow($sql);
-
-        return $result ? $result['element_type'] : null;
+        return !empty($rows) ? $rows[0]['element_type'] : null;
     }
 
     /**
@@ -560,12 +446,91 @@ class ClickTrackerLog extends ObjectModel
      */
     public static function getThisMonthClicks()
     {
-        $start = date('Y-m-01');
-        $end = date('Y-m-t');
-
         return self::getTotalClicks(array(
-            'date_from' => $start,
-            'date_to' => $end,
+            'date_from' => date('Y-m-01'),
+            'date_to' => date('Y-m-t'),
         ));
+    }
+
+    /**
+     * Strip query string and fragment from a URL
+     *
+     * @param string $url Full URL
+     * @return string
+     */
+    public static function normalizeUrl($url)
+    {
+        $url = explode('#', $url, 2);
+        $url = explode('?', $url[0], 2);
+
+        return $url[0];
+    }
+
+    /**
+     * SQL restriction on the shops of the current back office context
+     *
+     * @return string
+     */
+    protected static function getShopWhere()
+    {
+        $shopIds = array_map('intval', (array) Shop::getContextListShopID());
+        if (empty($shopIds)) {
+            $shopIds = array((int) Context::getContext()->shop->id);
+        }
+
+        return '`id_shop` IN (' . implode(',', $shopIds) . ')';
+    }
+
+    /**
+     * Build date range conditions
+     *
+     * @param string|null $start Start date (Y-m-d)
+     * @param string|null $end End date (Y-m-d)
+     * @return array SQL conditions
+     */
+    protected static function buildDateWhere($start = null, $end = null)
+    {
+        $where = array();
+
+        if (!empty($start)) {
+            $where[] = '`date_add` >= "' . pSQL($start) . ' 00:00:00"';
+        }
+
+        if (!empty($end)) {
+            $where[] = '`date_add` <= "' . pSQL($end) . ' 23:59:59"';
+        }
+
+        return $where;
+    }
+
+    /**
+     * Build conditions for the logs list / export filters
+     *
+     * @param array $filters Filters
+     * @return array SQL conditions
+     */
+    protected static function buildFilterWhere($filters)
+    {
+        $where = array();
+
+        if (!empty($filters['context_type'])) {
+            $where[] = '`context_type` = "' . pSQL($filters['context_type']) . '"';
+        }
+
+        if (!empty($filters['element_type'])) {
+            $where[] = '`element_type` = "' . pSQL($filters['element_type']) . '"';
+        }
+
+        $where = array_merge($where, self::buildDateWhere(
+            isset($filters['date_from']) ? $filters['date_from'] : null,
+            isset($filters['date_to']) ? $filters['date_to'] : null
+        ));
+
+        if (!empty($filters['search'])) {
+            $search = pSQL($filters['search']);
+            $where[] = '(`product_name` LIKE "%' . $search . '%" OR `page_url` LIKE "%' . $search . '%" OR `page_title` LIKE "%' . $search . '%")';
+        }
+
+        return $where;
     }
 }

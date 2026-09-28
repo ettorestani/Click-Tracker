@@ -27,7 +27,8 @@
             debug: false,
             token: '',
             ajaxUrl: '',
-            context: 'cms',
+            context: 'other',
+            pageType: '',
             productData: null,
             shouldTrackByPageType: false
         },
@@ -65,7 +66,7 @@
 
             // Validate configuration
             if (!this.config.classes || this.config.classes.length === 0) {
-                this.log('No CSS classes configured');
+                this.log('No CSS selectors configured');
                 return;
             }
 
@@ -84,7 +85,7 @@
             this.setupEventListener();
 
             this.initialized = true;
-            this.log('Initialized with classes: ' + this.config.classes.join(', '));
+            this.log('Initialized with selectors: ' + this.config.classes.join(', '));
         },
 
         /**
@@ -103,16 +104,12 @@
                     var selector = this.config.bodyClasses[i];
 
                     if (selector.charAt(0) === '#') {
-                        // ID selector - check body id
-                        var idToCheck = selector.substring(1);
-                        if (document.body.id === idToCheck) {
+                        if (document.body.id === selector.substring(1)) {
                             this.log('Body ID matched: ' + selector);
                             return true;
                         }
                     } else if (selector.charAt(0) === '.') {
-                        // Class selector - check body classes
-                        var classToCheck = selector.substring(1);
-                        if (document.body.classList.contains(classToCheck)) {
+                        if (document.body.classList.contains(selector.substring(1))) {
                             this.log('Body class matched: ' + selector);
                             return true;
                         }
@@ -139,48 +136,42 @@
          * @param {Event} event Click event
          */
         handleClick: function(event) {
-            var target = event.target;
+            var match = this.findMatchingElement(event.target);
 
-            // Find the matching element (could be the target or a parent)
-            var matchedElement = this.findMatchingElement(target);
-
-            if (!matchedElement) {
+            if (!match) {
                 return; // Not a tracked element
             }
 
             // Debounce check
-            if (this.isDuplicate(matchedElement)) {
+            if (this.isDuplicate(match.element)) {
                 this.log('Duplicate click ignored');
                 return;
             }
 
             // Check external only setting
-            if (this.config.externalOnly && !this.isExternalLink(matchedElement)) {
+            if (this.config.externalOnly && !this.isExternalLink(match.element)) {
                 this.log('Non-external link ignored');
                 return;
             }
 
-            // Collect and send tracking data
-            var data = this.collectData(matchedElement);
-            this.sendTracking(data);
-
-            // Mark as tracked
-            this.markAsTracked(matchedElement);
+            this.sendTracking(this.collectData(match.element, match.selector));
         },
 
         /**
-         * Find element matching tracked classes
+         * Find the clicked element (or closest ancestor) matching a tracked selector
          * @param {Element} target Click target
-         * @returns {Element|null} Matched element or null
+         * @returns {Object|null} {element, selector} or null
          */
         findMatchingElement: function(target) {
             var element = target;
             var maxDepth = 10; // Prevent infinite loops
             var depth = 0;
+            var selector;
 
             while (element && element !== document.body && depth < maxDepth) {
-                if (this.matchesSelector(element)) {
-                    return element;
+                selector = this.getMatchingSelector(element);
+                if (selector) {
+                    return { element: element, selector: selector };
                 }
                 element = element.parentElement;
                 depth++;
@@ -190,26 +181,26 @@
         },
 
         /**
-         * Check if element matches any tracked selector
+         * Return the first configured selector matched by the element
          * @param {Element} element Element to check
-         * @returns {boolean} True if matches
+         * @returns {string|null} Selector or null
          */
-        matchesSelector: function(element) {
+        getMatchingSelector: function(element) {
             if (!element || !element.matches) {
-                return false;
+                return null;
             }
 
             for (var i = 0; i < this.config.classes.length; i++) {
                 try {
                     if (element.matches(this.config.classes[i])) {
-                        return true;
+                        return this.config.classes[i];
                     }
                 } catch (e) {
                     this.log('Invalid selector: ' + this.config.classes[i]);
                 }
             }
 
-            return false;
+            return null;
         },
 
         /**
@@ -232,42 +223,49 @@
         },
 
         /**
-         * Mark element as tracked
-         * @param {Element} element Element to mark
-         */
-        markAsTracked: function(element) {
-            element.setAttribute('data-et-clicktracker-tracked', '1');
-        },
-
-        /**
-         * Check if link is external
+         * Check if the element links outside the shop
+         * (other domain, or non-http schemes such as tel:, mailto:, whatsapp:)
          * @param {Element} element Element to check
          * @returns {boolean} True if external
          */
         isExternalLink: function(element) {
-            var href = element.getAttribute('href') || '';
-            return href.indexOf('http://') === 0 || href.indexOf('https://') === 0;
+            var href = (element.getAttribute('href') || '').trim();
+
+            if (href === '' || href.charAt(0) === '#' || /^javascript:/i.test(href)) {
+                return false;
+            }
+
+            var scheme = href.match(/^([a-z][a-z0-9+.\-]*):/i);
+            if (scheme && !/^https?$/i.test(scheme[1])) {
+                return true;
+            }
+
+            try {
+                return new URL(href, window.location.href).hostname !== window.location.hostname;
+            } catch (e) {
+                return false;
+            }
         },
 
         /**
          * Collect tracking data from element
          * @param {Element} element Clicked element
+         * @param {string} selector Matched configured selector
          * @returns {Object} Tracking data
          */
-        collectData: function(element) {
+        collectData: function(element, selector) {
             var data = {
                 context: this.config.context,
-                clicked_class: this.getClickedClass(element),
+                page_type: this.config.pageType,
+                clicked_class: this.getSelectorLabel(selector),
                 element_type: this.getElementType(element),
                 page_url: window.location.href,
                 token: this.config.token
             };
 
-            // Add context-specific data
+            // Product name and category are resolved server side from the ID
             if (this.config.context === 'product' && this.config.productData) {
                 data.id_product = this.config.productData.id_product;
-                data.product_name = this.config.productData.product_name;
-                data.id_category = this.config.productData.id_category;
             } else {
                 data.page_title = this.getPageTitle();
             }
@@ -276,69 +274,78 @@
         },
 
         /**
-         * Get clicked element's class that matches configuration
-         * @param {Element} element Clicked element
-         * @returns {string} Matching class name
+         * Label stored for a selector: simple ".class" selectors without the dot
+         * (same rule as ClickTracker::getSelectorLabel)
+         * @param {string} selector CSS selector
+         * @returns {string} Label
          */
-        getClickedClass: function(element) {
-            var classes = element.className || '';
-
-            // Find which configured class matches
-            for (var i = 0; i < this.config.classes.length; i++) {
-                var selector = this.config.classes[i];
-                try {
-                    if (element.matches(selector)) {
-                        // Return the selector without the leading dot
-                        return selector.replace(/^\./, '');
-                    }
-                } catch (e) {
-                    // Invalid selector
-                }
-            }
-
-            // Fallback to first class
-            if (typeof classes === 'string') {
-                var classList = classes.split(/\s+/);
-                return classList[0] || 'unknown';
-            }
-
-            return 'unknown';
+        getSelectorLabel: function(selector) {
+            return /^\.[a-zA-Z0-9_\-]+$/.test(selector) ? selector.substring(1) : selector;
         },
 
         /**
-         * Determine element type from href or attributes
+         * Check if any class name contains one of the given words as a whole segment
+         * (segments are separated by "-" or "_": "btn-call" matches "call", "callout" does not)
+         * @param {Element} element Element to analyze
+         * @param {Array} words Words to look for
+         * @returns {boolean}
+         */
+        hasClassWord: function(element, words) {
+            var classes = element.classList || [];
+
+            for (var i = 0; i < classes.length; i++) {
+                var segments = classes[i].toLowerCase().split(/[-_]+/);
+                for (var j = 0; j < segments.length; j++) {
+                    if (words.indexOf(segments[j]) !== -1) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        },
+
+        /**
+         * Determine element type: the link target wins over class names
          * @param {Element} element Element to analyze
          * @returns {string} Element type
          */
         getElementType: function(element) {
-            var href = (element.getAttribute('href') || '').toLowerCase();
-            var classes = (element.className || '').toLowerCase();
-            var text = (element.textContent || '').toLowerCase();
+            var href = (element.getAttribute('href') || '').trim().toLowerCase();
 
-            // Check for WhatsApp
-            if (href.indexOf('wa.me') !== -1 ||
-                href.indexOf('whatsapp') !== -1 ||
-                href.indexOf('api.whatsapp') !== -1 ||
-                classes.indexOf('whatsapp') !== -1 ||
-                classes.indexOf('wa-') !== -1) {
+            if (href) {
+                if (href.indexOf('whatsapp:') === 0 ||
+                    href.indexOf('wa.me/') !== -1 ||
+                    href.indexOf('api.whatsapp.com') !== -1 ||
+                    href.indexOf('web.whatsapp.com') !== -1 ||
+                    href.indexOf('chat.whatsapp.com') !== -1) {
+                    return 'whatsapp';
+                }
+
+                if (href.indexOf('tel:') === 0 || href.indexOf('callto:') === 0) {
+                    return 'phone';
+                }
+
+                if (href.indexOf('geo:') === 0 ||
+                    /(^|\/\/|\.)google\.[a-z.]+\/maps/.test(href) ||
+                    href.indexOf('maps.google.') !== -1 ||
+                    href.indexOf('goo.gl/maps') !== -1 ||
+                    href.indexOf('maps.app.goo.gl') !== -1 ||
+                    href.indexOf('maps.apple.com') !== -1 ||
+                    href.indexOf('waze.com') !== -1) {
+                    return 'maps';
+                }
+            }
+
+            if (this.hasClassWord(element, ['whatsapp', 'wa'])) {
                 return 'whatsapp';
             }
 
-            // Check for Phone
-            if (href.indexOf('tel:') === 0 ||
-                classes.indexOf('phone') !== -1 ||
-                classes.indexOf('tel') !== -1 ||
-                classes.indexOf('call') !== -1) {
+            if (this.hasClassWord(element, ['phone', 'tel', 'call', 'telephone'])) {
                 return 'phone';
             }
 
-            // Check for Maps
-            if (href.indexOf('maps.google') !== -1 ||
-                href.indexOf('google.com/maps') !== -1 ||
-                href.indexOf('goo.gl/maps') !== -1 ||
-                href.indexOf('maps.app.goo.gl') !== -1 ||
-                classes.indexOf('maps') !== -1 ||
-                classes.indexOf('map') !== -1) {
+            if (this.hasClassWord(element, ['maps', 'map'])) {
                 return 'maps';
             }
 
@@ -366,30 +373,11 @@
         },
 
         /**
-         * Send tracking data to server
+         * Build form data from tracking data
          * @param {Object} data Tracking data
+         * @returns {FormData}
          */
-        sendTracking: function(data) {
-            var self = this;
-
-            try {
-                // Use fetch if available, otherwise XMLHttpRequest
-                if (typeof fetch === 'function') {
-                    this.sendWithFetch(data);
-                } else {
-                    this.sendWithXHR(data);
-                }
-            } catch (e) {
-                this.log('Error sending tracking: ' + e.message);
-            }
-        },
-
-        /**
-         * Send data using Fetch API
-         * @param {Object} data Tracking data
-         */
-        sendWithFetch: function(data) {
-            var self = this;
+        buildFormData: function(data) {
             var formData = new FormData();
 
             for (var key in data) {
@@ -398,16 +386,54 @@
                 }
             }
 
+            return formData;
+        },
+
+        /**
+         * Send tracking data to server.
+         * sendBeacon survives page navigation (links opening in the same tab);
+         * in debug mode fetch is used to read the server response.
+         * @param {Object} data Tracking data
+         */
+        sendTracking: function(data) {
+            var formData = this.buildFormData(data);
+
+            try {
+                if (!this.config.debug && navigator.sendBeacon) {
+                    if (navigator.sendBeacon(this.config.ajaxUrl, formData)) {
+                        return;
+                    }
+                    formData = this.buildFormData(data);
+                }
+
+                if (typeof fetch === 'function') {
+                    this.sendWithFetch(formData);
+                } else {
+                    this.sendWithXHR(formData);
+                }
+            } catch (e) {
+                this.log('Error sending tracking: ' + e.message);
+            }
+        },
+
+        /**
+         * Send data using Fetch API (keepalive lets the request outlive the page)
+         * @param {FormData} formData Tracking data
+         */
+        sendWithFetch: function(formData) {
+            var self = this;
+
             fetch(this.config.ajaxUrl, {
                 method: 'POST',
                 body: formData,
-                credentials: 'same-origin'
+                credentials: 'same-origin',
+                keepalive: true
             })
             .then(function(response) {
                 return response.json();
             })
             .then(function(result) {
-                self.log('Tracking sent: ' + (result.success ? 'success' : 'failed'));
+                self.log('Tracking sent: ' + (result.success ? 'success' : 'failed (' + result.error + ')'));
             })
             .catch(function(error) {
                 self.log('Tracking error: ' + error.message);
@@ -416,18 +442,11 @@
 
         /**
          * Send data using XMLHttpRequest (fallback)
-         * @param {Object} data Tracking data
+         * @param {FormData} formData Tracking data
          */
-        sendWithXHR: function(data) {
+        sendWithXHR: function(formData) {
             var self = this;
             var xhr = new XMLHttpRequest();
-            var formData = new FormData();
-
-            for (var key in data) {
-                if (data.hasOwnProperty(key) && data[key] !== null && data[key] !== undefined) {
-                    formData.append(key, data[key]);
-                }
-            }
 
             xhr.open('POST', this.config.ajaxUrl, true);
             xhr.withCredentials = true;
@@ -463,18 +482,17 @@
     // Expose to global scope with et_ prefix
     window.ET_ClickTracker = ET_ClickTracker;
 
-    // Auto-initialize when DOM is ready if config is available
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function() {
-            if (window.et_clickTrackerConfig) {
-                ET_ClickTracker.init(window.et_clickTrackerConfig);
-            }
-        });
-    } else {
-        // DOM already loaded
+    // Auto-initialize when DOM is ready (config is printed by Media::addJsDef)
+    function autoInit() {
         if (window.et_clickTrackerConfig) {
             ET_ClickTracker.init(window.et_clickTrackerConfig);
         }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', autoInit);
+    } else {
+        autoInit();
     }
 
 })();

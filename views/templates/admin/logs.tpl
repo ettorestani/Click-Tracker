@@ -129,7 +129,7 @@
                                 </td>
                                 <td>{$log.id_clicktracker_log|intval}</td>
                                 <td>
-                                    <span class="label label-{if $log.context_type == 'product'}info{else}success{/if}">
+                                    <span class="label label-{if $log.context_type == 'product'}info{elseif $log.context_type == 'cms'}success{else}default{/if}">
                                         {if isset($context_types[$log.context_type])}{$context_types[$log.context_type]|escape:'htmlall':'UTF-8'}{else}{$log.context_type|escape:'htmlall':'UTF-8'}{/if}
                                     </span>
                                 </td>
@@ -149,18 +149,21 @@
                                 </td>
                                 <td>
                                     {if $log.context_type == 'product' && $log.id_product}
-                                        <strong>{$log.product_name|escape:'htmlall':'UTF-8'|truncate:40:'...'}</strong>
+                                        <strong>{$log.product_name|truncate:40:'...'|escape:'htmlall':'UTF-8'}</strong>
                                         <br><small class="text-muted">ID: {$log.id_product|intval}</small>
                                     {else}
-                                        <span title="{$log.page_url|escape:'htmlall':'UTF-8'}">{$log.page_title|default:$log.page_url|escape:'htmlall':'UTF-8'|truncate:50:'...'}</span>
+                                        <span title="{$log.page_url|escape:'htmlall':'UTF-8'}">{$log.page_title|default:$log.page_url|truncate:50:'...'|escape:'htmlall':'UTF-8'}</span>
+                                        {if $log.page_type}<br><small class="text-muted">{$log.page_type|escape:'htmlall':'UTF-8'}</small>{/if}
                                     {/if}
                                 </td>
                                 <td><code>{$log.clicked_class|escape:'htmlall':'UTF-8'}</code></td>
                                 <td>{$log.date_add|escape:'htmlall':'UTF-8'}</td>
                                 <td class="text-center">
-                                    <a href="{$log.page_url|escape:'htmlall':'UTF-8'}" target="_blank" class="btn btn-default btn-xs" title="{l s='View Page' mod='clicktracker'}">
-                                        <i class="icon-external-link"></i>
-                                    </a>
+                                    {if $log.has_safe_url}
+                                        <a href="{$log.page_url|escape:'htmlall':'UTF-8'}" target="_blank" rel="noopener noreferrer" class="btn btn-default btn-xs" title="{l s='View Page' mod='clicktracker'}">
+                                            <i class="icon-external-link"></i>
+                                        </a>
+                                    {/if}
                                     <form method="post" action="{$moduleLink|escape:'htmlall':'UTF-8'}" class="et-clicktracker-delete-form" style="display:inline;">
                                         <input type="hidden" name="id_log" value="{$log.id_clicktracker_log|intval}">
                                         <button type="submit" name="submitDeleteLog" class="btn btn-danger btn-xs" title="{l s='Delete' mod='clicktracker'}">
@@ -197,7 +200,7 @@
                 <ul class="pagination">
                     {if $page > 1}
                         <li>
-                            <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&page={$page - 1}&filter_context={$filters.context_type|escape:'htmlall':'UTF-8'}&filter_element={$filters.element_type|escape:'htmlall':'UTF-8'}&filter_date_from={$filters.date_from|escape:'htmlall':'UTF-8'}&filter_date_to={$filters.date_to|escape:'htmlall':'UTF-8'}&filter_search={$filters.search|escape:'htmlall':'UTF-8'}">&laquo;</a>
+                            <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&page={$page - 1}&{$filter_query|escape:'htmlall':'UTF-8'}">&laquo;</a>
                         </li>
                     {/if}
 
@@ -206,7 +209,7 @@
                             <li class="active"><span>{$i}</span></li>
                         {elseif $i <= 3 || $i > $total_pages - 3 || ($i >= $page - 2 && $i <= $page + 2)}
                             <li>
-                                <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&page={$i}&filter_context={$filters.context_type|escape:'htmlall':'UTF-8'}&filter_element={$filters.element_type|escape:'htmlall':'UTF-8'}&filter_date_from={$filters.date_from|escape:'htmlall':'UTF-8'}&filter_date_to={$filters.date_to|escape:'htmlall':'UTF-8'}&filter_search={$filters.search|escape:'htmlall':'UTF-8'}">{$i}</a>
+                                <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&page={$i}&{$filter_query|escape:'htmlall':'UTF-8'}">{$i}</a>
                             </li>
                         {elseif $i == 4 || $i == $total_pages - 3}
                             <li><span>...</span></li>
@@ -215,7 +218,7 @@
 
                     {if $page < $total_pages}
                         <li>
-                            <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&page={$page + 1}&filter_context={$filters.context_type|escape:'htmlall':'UTF-8'}&filter_element={$filters.element_type|escape:'htmlall':'UTF-8'}&filter_date_from={$filters.date_from|escape:'htmlall':'UTF-8'}&filter_date_to={$filters.date_to|escape:'htmlall':'UTF-8'}&filter_search={$filters.search|escape:'htmlall':'UTF-8'}">&raquo;</a>
+                            <a href="{$moduleLink|escape:'htmlall':'UTF-8'}&page={$page + 1}&{$filter_query|escape:'htmlall':'UTF-8'}">&raquo;</a>
                         </li>
                     {/if}
                 </ul>

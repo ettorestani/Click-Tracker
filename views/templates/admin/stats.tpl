@@ -44,8 +44,8 @@
                     <div class="clicktracker-card-icon">
                         <i class="icon-mouse-pointer"></i>
                     </div>
-                    <div class="clicktracker-card-value">{$total_clicks|intval}</div>
-                    <div class="clicktracker-card-label">{l s='Total Clicks' mod='clicktracker'}</div>
+                    <div class="clicktracker-card-value">{$period_clicks|intval}</div>
+                    <div class="clicktracker-card-label">{l s='Clicks in Period' mod='clicktracker'}</div>
                 </div>
             </div>
         </div>
@@ -89,7 +89,7 @@
                     </div>
                     <div class="clicktracker-card-label">
                         {if $top_product}
-                            {$top_product.product_name|escape:'htmlall':'UTF-8'|truncate:25:'...'}
+                            {$top_product.product_name|truncate:25:'...'|escape:'htmlall':'UTF-8'}
                         {else}
                             {l s='Top Product' mod='clicktracker'}
                         {/if}
@@ -108,7 +108,7 @@
                     <i class="icon-line-chart"></i> {l s='Clicks Over Time' mod='clicktracker'}
                 </div>
                 <div class="panel-body">
-                    {if $chart_dates && $chart_dates != '[]'}
+                    {if $has_period_clicks}
                         <canvas id="clicksTimeChart" height="100"></canvas>
                     {else}
                         <p class="text-center text-muted">{l s='No data available for the selected period.' mod='clicktracker'}</p>
@@ -149,8 +149,12 @@
                                     <span class="badge">{$context.total|intval}</span>
                                     {if $context.context_type == 'product'}
                                         <i class="icon-shopping-cart"></i> {l s='Product Pages' mod='clicktracker'}
-                                    {else}
+                                    {elseif $context.context_type == 'cms'}
                                         <i class="icon-file-text"></i> {l s='CMS/Blog Pages' mod='clicktracker'}
+                                    {elseif isset($context_types[$context.context_type])}
+                                        <i class="icon-file"></i> {$context_types[$context.context_type]|escape:'htmlall':'UTF-8'}
+                                    {else}
+                                        <i class="icon-file"></i> {$context.context_type|escape:'htmlall':'UTF-8'}
                                     {/if}
                                 </li>
                             {/foreach}
@@ -175,7 +179,7 @@
                                 <li class="list-group-item">
                                     <span class="badge">{$product.total_clicks|intval}</span>
                                     <span class="clicktracker-rank">{$smarty.foreach.topProducts.iteration}.</span>
-                                    {$product.product_name|escape:'htmlall':'UTF-8'|truncate:30:'...'}
+                                    {$product.product_name|truncate:30:'...'|escape:'htmlall':'UTF-8'}
                                 </li>
                             {/foreach}
                         </ul>
@@ -190,7 +194,7 @@
         <div class="col-md-4">
             <div class="panel">
                 <div class="panel-heading">
-                    <i class="icon-file"></i> {l s='Top 10 CMS Pages' mod='clicktracker'}
+                    <i class="icon-file"></i> {l s='Top 10 Pages' mod='clicktracker'}
                 </div>
                 <div class="panel-body">
                     {if $top_pages && count($top_pages) > 0}
@@ -200,13 +204,13 @@
                                     <span class="badge">{$page.total_clicks|intval}</span>
                                     <span class="clicktracker-rank">{$smarty.foreach.topPages.iteration}.</span>
                                     <span title="{$page.page_url|escape:'htmlall':'UTF-8'}">
-                                        {$page.page_title|default:$page.page_url|escape:'htmlall':'UTF-8'|truncate:25:'...'}
+                                        {$page.page_title|default:$page.page_url|truncate:25:'...'|escape:'htmlall':'UTF-8'}
                                     </span>
                                 </li>
                             {/foreach}
                         </ul>
                     {else}
-                        <p class="text-center text-muted">{l s='No CMS page clicks recorded.' mod='clicktracker'}</p>
+                        <p class="text-center text-muted">{l s='No page clicks recorded.' mod='clicktracker'}</p>
                     {/if}
                 </div>
             </div>
@@ -271,12 +275,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     labels: pieLabels,
                     datasets: [{
                         data: pieCounts,
-                        backgroundColor: [
-                            '#25D366', // WhatsApp green
-                            '#007bff', // Phone blue
-                            '#EA4335', // Maps red
-                            '#6c757d'  // Other gray
-                        ],
+                        backgroundColor: {$pie_colors nofilter},
                         borderWidth: 2
                     }]
                 },

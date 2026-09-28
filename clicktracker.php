@@ -8,7 +8,7 @@
  * @author    Ettore Stani
  * @copyright 2024 Ettore Stani
  * @license   https://opensource.org/licenses/AFL-3.0 Academic Free License 3.0 (AFL-3.0)
- * @version   1.0.0
+ * @version   1.1.0
  */
 
 if (!defined('_PS_VERSION_')) {
@@ -22,14 +22,27 @@ class ClickTracker extends Module
     /** @var string Configuration key prefix */
     const CONFIG_PREFIX = 'CLICKTRACKER_';
 
+    /** @var int Above this number of days the time chart is grouped by month */
+    const CHART_DAILY_MAX_DAYS = 92;
+
     /** @var array Configuration keys */
     protected $configKeys = array(
         'CSS_CLASSES',
         'BODY_CLASSES',
         'TRACK_PRODUCT',
         'TRACK_CMS',
+        'TRACK_OTHER',
         'EXTERNAL_ONLY',
         'DEBUG',
+        'DELETE_ON_UNINSTALL',
+    );
+
+    /** @var array Chart colors by element type */
+    protected $elementColors = array(
+        'whatsapp' => '#25D366',
+        'phone' => '#007bff',
+        'maps' => '#EA4335',
+        'other' => '#6c757d',
     );
 
     /**
@@ -39,7 +52,7 @@ class ClickTracker extends Module
     {
         $this->name = 'clicktracker';
         $this->tab = 'analytics_stats';
-        $this->version = '1.0.0';
+        $this->version = '1.1.0';
         $this->author = 'Ettore Stani';
         $this->need_instance = 0;
         $this->ps_versions_compliancy = array(
@@ -52,7 +65,12 @@ class ClickTracker extends Module
 
         $this->displayName = $this->l('Click Tracker');
         $this->description = $this->l('Advanced click tracking system to monitor user interactions with specific page elements (WhatsApp, phone buttons, CTAs)');
-        $this->confirmUninstall = $this->l('Are you sure you want to uninstall? All tracking data will be permanently deleted.');
+
+        if (Configuration::get(self::CONFIG_PREFIX . 'DELETE_ON_UNINSTALL')) {
+            $this->confirmUninstall = $this->l('Are you sure you want to uninstall? All tracking data will be permanently deleted.');
+        } else {
+            $this->confirmUninstall = $this->l('Are you sure you want to uninstall? Tracking data will be kept in the database.');
+        }
     }
 
     /**
@@ -62,11 +80,12 @@ class ClickTracker extends Module
      */
     public function install()
     {
-        // Include SQL install script
-        include dirname(__FILE__) . '/sql/install.php';
+        if (!(include dirname(__FILE__) . '/sql/install.php')) {
+            return false;
+        }
 
         return parent::install()
-            && $this->registerHook('displayHeader')
+            && $this->registerHook('actionFrontControllerSetMedia')
             && $this->setDefaultConfiguration();
     }
 
@@ -77,16 +96,18 @@ class ClickTracker extends Module
      */
     public function uninstall()
     {
-        // Include SQL uninstall script
-        include dirname(__FILE__) . '/sql/uninstall.php';
+        // Used by sql/uninstall.php
+        $deleteLogs = (bool) Configuration::get(self::CONFIG_PREFIX . 'DELETE_ON_UNINSTALL');
 
-        // Remove all configuration values
+        if (!(include dirname(__FILE__) . '/sql/uninstall.php')) {
+            return false;
+        }
+
         foreach ($this->configKeys as $key) {
             Configuration::deleteByName(self::CONFIG_PREFIX . $key);
         }
 
-        return $this->unregisterHook('displayHeader')
-            && parent::uninstall();
+        return parent::uninstall();
     }
 
     /**
@@ -100,8 +121,10 @@ class ClickTracker extends Module
             && Configuration::updateValue(self::CONFIG_PREFIX . 'BODY_CLASSES', '')
             && Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_PRODUCT', 1)
             && Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_CMS', 1)
+            && Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_OTHER', 0)
             && Configuration::updateValue(self::CONFIG_PREFIX . 'EXTERNAL_ONLY', 0)
-            && Configuration::updateValue(self::CONFIG_PREFIX . 'DEBUG', 0);
+            && Configuration::updateValue(self::CONFIG_PREFIX . 'DEBUG', 0)
+            && Configuration::updateValue(self::CONFIG_PREFIX . 'DELETE_ON_UNINSTALL', 0);
     }
 
     /**
@@ -119,7 +142,7 @@ class ClickTracker extends Module
         $output = '';
 
         // Handle form submissions (POST only for security)
-        if (Tools::isSubmit('submitClickTrackerConfig') && Tools::getIsset('submitClickTrackerConfig')) {
+        if (Tools::isSubmit('submitClickTrackerConfig')) {
             $output .= $this->processConfigForm();
         }
 
@@ -129,7 +152,7 @@ class ClickTracker extends Module
         }
 
         // Handle bulk delete (POST only)
-        if (Tools::isSubmit('submitBulkDelete') && Tools::getValue('logBox')) {
+        if (Tools::isSubmit('submitBulkDelete') && is_array(Tools::getValue('logBox'))) {
             $output .= $this->processBulkDelete(Tools::getValue('logBox'));
         }
 
@@ -197,7 +220,7 @@ class ClickTracker extends Module
         $this->context->smarty->assign(array(
             'tabs' => $tabs,
             'activeTab' => $activeTab,
-            'moduleLink' => $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name,
+            'moduleLink' => $this->getModuleAdminLink(),
         ));
 
         return $this->context->smarty->fetch($this->local_path . 'views/templates/admin/tabs.tpl');
@@ -234,6 +257,39 @@ class ClickTracker extends Module
     }
 
     /**
+     * Build a yes/no switch field for HelperForm
+     *
+     * @param string $key Configuration key (without prefix)
+     * @param string $label Field label
+     * @param string $desc Field description
+     * @return array
+     */
+    protected function getSwitchField($key, $label, $desc)
+    {
+        $id = Tools::strtolower($key);
+
+        return array(
+            'type' => 'switch',
+            'label' => $label,
+            'name' => self::CONFIG_PREFIX . $key,
+            'desc' => $desc,
+            'is_bool' => true,
+            'values' => array(
+                array(
+                    'id' => $id . '_on',
+                    'value' => 1,
+                    'label' => $this->l('Yes'),
+                ),
+                array(
+                    'id' => $id . '_off',
+                    'value' => 0,
+                    'label' => $this->l('No'),
+                ),
+            ),
+        );
+    }
+
+    /**
      * Get configuration form structure
      *
      * @return array Form structure
@@ -249,9 +305,9 @@ class ClickTracker extends Module
                 'input' => array(
                     array(
                         'type' => 'textarea',
-                        'label' => $this->l('CSS Classes to Track'),
+                        'label' => $this->l('CSS Selectors to Track'),
                         'name' => self::CONFIG_PREFIX . 'CSS_CLASSES',
-                        'desc' => $this->l('Enter CSS classes to track, one per line. Examples: .btn-wa, .btn-phone, .btn-maps. Only elements with these classes will be tracked.'),
+                        'desc' => $this->l('Enter CSS selectors to track, one per line. Examples: .btn-wa, #call-button, a[href^="tel:"], a[href*="wa.me"]. Only elements matching these selectors will be tracked.'),
                         'cols' => 60,
                         'rows' => 6,
                     ),
@@ -259,86 +315,16 @@ class ClickTracker extends Module
                         'type' => 'textarea',
                         'label' => $this->l('Page Selectors (Optional)'),
                         'name' => self::CONFIG_PREFIX . 'BODY_CLASSES',
-                        'desc' => $this->l('Enter body classes or IDs to activate tracking on specific pages, one per line. Use dot for classes (.module-smartblog-details) or hash for IDs (#checkout). Leave empty to use only product/CMS detection.'),
+                        'desc' => $this->l('Enter body classes or IDs to activate tracking on specific pages, one per line. Use dot for classes (.module-smartblog-details) or hash for IDs (#checkout). Leave empty to use only page type detection.'),
                         'cols' => 60,
                         'rows' => 4,
                     ),
-                    array(
-                        'type' => 'switch',
-                        'label' => $this->l('Track Product Pages'),
-                        'name' => self::CONFIG_PREFIX . 'TRACK_PRODUCT',
-                        'desc' => $this->l('Enable click tracking on product pages.'),
-                        'is_bool' => true,
-                        'values' => array(
-                            array(
-                                'id' => 'track_product_on',
-                                'value' => 1,
-                                'label' => $this->l('Yes'),
-                            ),
-                            array(
-                                'id' => 'track_product_off',
-                                'value' => 0,
-                                'label' => $this->l('No'),
-                            ),
-                        ),
-                    ),
-                    array(
-                        'type' => 'switch',
-                        'label' => $this->l('Track CMS/Blog Pages'),
-                        'name' => self::CONFIG_PREFIX . 'TRACK_CMS',
-                        'desc' => $this->l('Enable click tracking on CMS and blog pages.'),
-                        'is_bool' => true,
-                        'values' => array(
-                            array(
-                                'id' => 'track_cms_on',
-                                'value' => 1,
-                                'label' => $this->l('Yes'),
-                            ),
-                            array(
-                                'id' => 'track_cms_off',
-                                'value' => 0,
-                                'label' => $this->l('No'),
-                            ),
-                        ),
-                    ),
-                    array(
-                        'type' => 'switch',
-                        'label' => $this->l('Track External Links Only'),
-                        'name' => self::CONFIG_PREFIX . 'EXTERNAL_ONLY',
-                        'desc' => $this->l('Track only links with http/https in the href attribute.'),
-                        'is_bool' => true,
-                        'values' => array(
-                            array(
-                                'id' => 'external_on',
-                                'value' => 1,
-                                'label' => $this->l('Yes'),
-                            ),
-                            array(
-                                'id' => 'external_off',
-                                'value' => 0,
-                                'label' => $this->l('No'),
-                            ),
-                        ),
-                    ),
-                    array(
-                        'type' => 'switch',
-                        'label' => $this->l('Debug Mode'),
-                        'name' => self::CONFIG_PREFIX . 'DEBUG',
-                        'desc' => $this->l('Enable debug mode to log JavaScript errors to browser console.'),
-                        'is_bool' => true,
-                        'values' => array(
-                            array(
-                                'id' => 'debug_on',
-                                'value' => 1,
-                                'label' => $this->l('Yes'),
-                            ),
-                            array(
-                                'id' => 'debug_off',
-                                'value' => 0,
-                                'label' => $this->l('No'),
-                            ),
-                        ),
-                    ),
+                    $this->getSwitchField('TRACK_PRODUCT', $this->l('Track Product Pages'), $this->l('Enable click tracking on product pages.')),
+                    $this->getSwitchField('TRACK_CMS', $this->l('Track CMS/Blog Pages'), $this->l('Enable click tracking on CMS and blog pages.')),
+                    $this->getSwitchField('TRACK_OTHER', $this->l('Track All Other Pages'), $this->l('Enable click tracking on every other page (home, categories, 404, contact...).')),
+                    $this->getSwitchField('EXTERNAL_ONLY', $this->l('Track External Links Only'), $this->l('Track only links that leave the shop: links to other domains and tel:, mailto:, whatsapp: links. Internal links and buttons without href are ignored.')),
+                    $this->getSwitchField('DEBUG', $this->l('Debug Mode'), $this->l('Enable debug mode to log JavaScript errors to browser console.')),
+                    $this->getSwitchField('DELETE_ON_UNINSTALL', $this->l('Delete Data on Uninstall'), $this->l('If enabled, all click logs are permanently deleted when the module is uninstalled or reset.')),
                 ),
                 'submit' => array(
                     'title' => $this->l('Save'),
@@ -354,14 +340,12 @@ class ClickTracker extends Module
      */
     protected function getConfigFormValues()
     {
-        return array(
-            self::CONFIG_PREFIX . 'CSS_CLASSES' => Configuration::get(self::CONFIG_PREFIX . 'CSS_CLASSES'),
-            self::CONFIG_PREFIX . 'BODY_CLASSES' => Configuration::get(self::CONFIG_PREFIX . 'BODY_CLASSES'),
-            self::CONFIG_PREFIX . 'TRACK_PRODUCT' => Configuration::get(self::CONFIG_PREFIX . 'TRACK_PRODUCT'),
-            self::CONFIG_PREFIX . 'TRACK_CMS' => Configuration::get(self::CONFIG_PREFIX . 'TRACK_CMS'),
-            self::CONFIG_PREFIX . 'EXTERNAL_ONLY' => Configuration::get(self::CONFIG_PREFIX . 'EXTERNAL_ONLY'),
-            self::CONFIG_PREFIX . 'DEBUG' => Configuration::get(self::CONFIG_PREFIX . 'DEBUG'),
-        );
+        $values = array();
+        foreach ($this->configKeys as $key) {
+            $values[self::CONFIG_PREFIX . $key] = Configuration::get(self::CONFIG_PREFIX . $key);
+        }
+
+        return $values;
     }
 
     /**
@@ -371,84 +355,210 @@ class ClickTracker extends Module
      */
     protected function processConfigForm()
     {
-        $cssClasses = Tools::getValue(self::CONFIG_PREFIX . 'CSS_CLASSES', '');
-        $bodyClasses = Tools::getValue(self::CONFIG_PREFIX . 'BODY_CLASSES', '');
-
-        // Validate and clean CSS classes
-        $cssClasses = $this->validateCssClasses($cssClasses);
-        $bodyClasses = $this->validateBodyClasses($bodyClasses);
+        $rejected = array();
+        $cssClasses = $this->validateCssSelectors(Tools::getValue(self::CONFIG_PREFIX . 'CSS_CLASSES', ''), $rejected);
+        $bodyClasses = $this->validateBodyClasses(Tools::getValue(self::CONFIG_PREFIX . 'BODY_CLASSES', ''), $rejected);
 
         Configuration::updateValue(self::CONFIG_PREFIX . 'CSS_CLASSES', $cssClasses);
         Configuration::updateValue(self::CONFIG_PREFIX . 'BODY_CLASSES', $bodyClasses);
-        Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_PRODUCT', (int) Tools::getValue(self::CONFIG_PREFIX . 'TRACK_PRODUCT'));
-        Configuration::updateValue(self::CONFIG_PREFIX . 'TRACK_CMS', (int) Tools::getValue(self::CONFIG_PREFIX . 'TRACK_CMS'));
-        Configuration::updateValue(self::CONFIG_PREFIX . 'EXTERNAL_ONLY', (int) Tools::getValue(self::CONFIG_PREFIX . 'EXTERNAL_ONLY'));
-        Configuration::updateValue(self::CONFIG_PREFIX . 'DEBUG', (int) Tools::getValue(self::CONFIG_PREFIX . 'DEBUG'));
 
-        return $this->displayConfirmation($this->l('Settings saved successfully.'));
+        foreach (array('TRACK_PRODUCT', 'TRACK_CMS', 'TRACK_OTHER', 'EXTERNAL_ONLY', 'DEBUG', 'DELETE_ON_UNINSTALL') as $key) {
+            Configuration::updateValue(self::CONFIG_PREFIX . $key, (int) Tools::getValue(self::CONFIG_PREFIX . $key));
+        }
+
+        $output = $this->displayConfirmation($this->l('Settings saved successfully.'));
+        if (!empty($rejected)) {
+            $output .= $this->displayWarning($this->l('The following selectors were ignored because they are not valid:') . ' ' . implode(', ', $rejected));
+        }
+
+        return $output;
     }
 
     /**
-     * Validate and clean CSS classes input
+     * Validate and clean tracked CSS selectors
+     *
+     * Simple words are treated as classes; full CSS selectors (attributes, combinators) are allowed.
      *
      * @param string $input Raw input
-     * @return string Cleaned CSS classes
+     * @param array $rejected Collects rejected lines
+     * @return string Cleaned selectors, one per line
      */
-    protected function validateCssClasses($input)
+    protected function validateCssSelectors($input, array &$rejected)
     {
-        $lines = explode("\n", $input);
         $cleaned = array();
 
-        foreach ($lines as $line) {
+        foreach (preg_split('/\r\n|\r|\n/', (string) $input) as $line) {
             $line = trim($line);
-            if (empty($line)) {
+            if ($line === '') {
                 continue;
             }
 
-            // Ensure class starts with . if it doesn't
-            if (strpos($line, '.') !== 0 && strpos($line, '#') !== 0) {
+            // Bare word: treat as class name
+            if (preg_match('/^[a-zA-Z_\-][a-zA-Z0-9_\-]*$/', $line)) {
                 $line = '.' . $line;
             }
 
-            // Basic validation - only allow valid CSS selector characters
-            if (preg_match('/^[.#][a-zA-Z0-9_\-]+$/', $line)) {
+            // Allowed CSS selector characters only (no braces, angle brackets or semicolons)
+            if (Tools::strlen($line) <= 255 && preg_match('/^[a-zA-Z0-9_\-.#\[\]=^$*~|"\' :(),>+]+$/', $line)) {
                 $cleaned[] = $line;
+            } else {
+                $rejected[] = $line;
             }
         }
 
-        return implode("\n", $cleaned);
+        return implode("\n", array_unique($cleaned));
     }
 
     /**
      * Validate and clean body selectors input (classes and IDs)
      *
      * @param string $input Raw input
+     * @param array $rejected Collects rejected lines
      * @return string Cleaned body selectors
      */
-    protected function validateBodyClasses($input)
+    protected function validateBodyClasses($input, array &$rejected)
     {
-        $lines = explode("\n", $input);
         $cleaned = array();
 
-        foreach ($lines as $line) {
+        foreach (preg_split('/\r\n|\r|\n/', (string) $input) as $line) {
             $line = trim($line);
-            if (empty($line)) {
+            if ($line === '') {
                 continue;
             }
 
             // Ensure selector starts with . or #
             if (strpos($line, '.') !== 0 && strpos($line, '#') !== 0) {
-                // Default to class if no prefix
                 $line = '.' . $line;
             }
 
-            // Basic validation - only allow valid CSS selector characters
             if (preg_match('/^[.#][a-zA-Z][a-zA-Z0-9_\-]*$/', $line)) {
                 $cleaned[] = $line;
+            } else {
+                $rejected[] = $line;
             }
         }
 
-        return implode("\n", $cleaned);
+        return implode("\n", array_unique($cleaned));
+    }
+
+    /**
+     * Configured selectors to track
+     *
+     * @return array
+     */
+    public function getTrackedSelectors()
+    {
+        $config = (string) Configuration::get(self::CONFIG_PREFIX . 'CSS_CLASSES');
+
+        return array_values(array_filter(array_map('trim', explode("\n", $config)), 'strlen'));
+    }
+
+    /**
+     * Labels stored in clicked_class for each configured selector
+     *
+     * @return array
+     */
+    public function getTrackedSelectorLabels()
+    {
+        return array_map(array('ClickTracker', 'getSelectorLabel'), $this->getTrackedSelectors());
+    }
+
+    /**
+     * Label stored for a selector: simple ".class" selectors are stored without the dot
+     * (same rule as tracker.js)
+     *
+     * @param string $selector CSS selector
+     * @return string
+     */
+    public static function getSelectorLabel($selector)
+    {
+        return preg_match('/^\.[a-zA-Z0-9_\-]+$/', $selector) ? Tools::substr($selector, 1) : $selector;
+    }
+
+    /**
+     * Context type labels
+     *
+     * @return array
+     */
+    protected function getContextTypeLabels()
+    {
+        return array(
+            'product' => $this->l('Product'),
+            'cms' => $this->l('CMS'),
+            'category' => $this->l('Category'),
+            'home' => $this->l('Home'),
+            'other' => $this->l('Other'),
+        );
+    }
+
+    /**
+     * Element type labels
+     *
+     * @return array
+     */
+    protected function getElementTypeLabels()
+    {
+        return array(
+            'whatsapp' => $this->l('WhatsApp'),
+            'phone' => $this->l('Phone'),
+            'maps' => $this->l('Maps'),
+            'other' => $this->l('Other'),
+        );
+    }
+
+    /**
+     * Module admin link
+     *
+     * @param array $params Additional query parameters
+     * @return string
+     */
+    protected function getModuleAdminLink(array $params = array())
+    {
+        $link = $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name;
+
+        return $params ? $link . '&' . http_build_query($params) : $link;
+    }
+
+    /**
+     * Return a Y-m-d date or the default value
+     *
+     * @param mixed $value Raw value
+     * @param string $default Default value
+     * @return string
+     */
+    protected function sanitizeDate($value, $default = '')
+    {
+        if (is_string($value) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+            $parts = explode('-', $value);
+            if (checkdate((int) $parts[1], (int) $parts[2], (int) $parts[0])) {
+                return $value;
+            }
+        }
+
+        return $default;
+    }
+
+    /**
+     * Read log filters from the request
+     *
+     * @return array Non-empty filters
+     */
+    protected function getLogFilters()
+    {
+        $context = Tools::getValue('filter_context', '');
+        $element = Tools::getValue('filter_element', '');
+
+        $filters = array(
+            'context_type' => array_key_exists($context, $this->getContextTypeLabels()) ? $context : '',
+            'element_type' => array_key_exists($element, $this->getElementTypeLabels()) ? $element : '',
+            'date_from' => $this->sanitizeDate(Tools::getValue('filter_date_from', '')),
+            'date_to' => $this->sanitizeDate(Tools::getValue('filter_date_to', '')),
+            'search' => trim((string) Tools::getValue('filter_search', '')),
+        );
+
+        return array_filter($filters, function ($value) {
+            return $value !== '';
+        });
     }
 
     /**
@@ -458,19 +568,7 @@ class ClickTracker extends Module
      */
     protected function renderLogsPage()
     {
-        // Get filters from request
-        $filters = array(
-            'context_type' => Tools::getValue('filter_context', ''),
-            'element_type' => Tools::getValue('filter_element', ''),
-            'date_from' => Tools::getValue('filter_date_from', ''),
-            'date_to' => Tools::getValue('filter_date_to', ''),
-            'search' => Tools::getValue('filter_search', ''),
-        );
-
-        // Remove empty filters
-        $filters = array_filter($filters, function ($value) {
-            return $value !== '';
-        });
+        $filters = $this->getLogFilters();
 
         $page = max(1, (int) Tools::getValue('page', 1));
         $perPage = (int) Tools::getValue('per_page', 20);
@@ -480,19 +578,20 @@ class ClickTracker extends Module
         // Get paginated logs
         $result = ClickTrackerLog::getLogsWithPagination($page, $perPage, $filters, $orderBy, $orderDir);
 
-        // Element type labels
-        $elementTypes = array(
-            'whatsapp' => $this->l('WhatsApp'),
-            'phone' => $this->l('Phone'),
-            'maps' => $this->l('Maps'),
-            'other' => $this->l('Other'),
-        );
+        // Only http(s) URLs are rendered as links (old rows were not validated server side)
+        foreach ($result['items'] as &$item) {
+            $item['has_safe_url'] = (bool) preg_match('#^https?://#i', $item['page_url']);
+        }
+        unset($item);
 
-        // Context type labels
-        $contextTypes = array(
-            'product' => $this->l('Product'),
-            'cms' => $this->l('CMS'),
-        );
+        // Query string used by pagination links (URL-encoded)
+        $filterQuery = http_build_query(array(
+            'filter_context' => isset($filters['context_type']) ? $filters['context_type'] : '',
+            'filter_element' => isset($filters['element_type']) ? $filters['element_type'] : '',
+            'filter_date_from' => isset($filters['date_from']) ? $filters['date_from'] : '',
+            'filter_date_to' => isset($filters['date_to']) ? $filters['date_to'] : '',
+            'filter_search' => isset($filters['search']) ? $filters['search'] : '',
+        ));
 
         $this->context->smarty->assign(array(
             'logs' => $result['items'],
@@ -507,11 +606,12 @@ class ClickTracker extends Module
                 'date_to' => '',
                 'search' => '',
             ),
+            'filter_query' => $filterQuery,
             'order_by' => $orderBy,
             'order_dir' => $orderDir,
-            'element_types' => $elementTypes,
-            'context_types' => $contextTypes,
-            'moduleLink' => $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name . '&section=logs',
+            'element_types' => $this->getElementTypeLabels(),
+            'context_types' => $this->getContextTypeLabels(),
+            'moduleLink' => $this->getModuleAdminLink(array('section' => 'logs')),
             'token' => Tools::getAdminTokenLite('AdminModules'),
         ));
 
@@ -526,61 +626,57 @@ class ClickTracker extends Module
     protected function renderStatsPage()
     {
         // Date range for filters (default: last 30 days)
-        $dateFrom = Tools::getValue('stats_date_from', date('Y-m-d', strtotime('-30 days')));
-        $dateTo = Tools::getValue('stats_date_to', date('Y-m-d'));
+        $dateFrom = $this->sanitizeDate(Tools::getValue('stats_date_from'), date('Y-m-d', strtotime('-30 days')));
+        $dateTo = $this->sanitizeDate(Tools::getValue('stats_date_to'), date('Y-m-d'));
+        if ($dateFrom > $dateTo) {
+            list($dateFrom, $dateTo) = array($dateTo, $dateFrom);
+        }
 
-        // Overview cards data
-        $totalClicks = ClickTrackerLog::getTotalClicks();
+        $elementTypeLabels = $this->getElementTypeLabels();
+
+        // Overview cards (all but "this month" follow the selected period)
+        $periodClicks = ClickTrackerLog::getTotalClicks(array('date_from' => $dateFrom, 'date_to' => $dateTo));
         $thisMonthClicks = ClickTrackerLog::getThisMonthClicks();
-        $mostClickedType = ClickTrackerLog::getMostClickedElementType();
-        $topProducts = ClickTrackerLog::getTopProducts(1, $dateFrom, $dateTo);
-        $topProduct = !empty($topProducts) ? $topProducts[0] : null;
+        $mostClickedType = ClickTrackerLog::getMostClickedElementType($dateFrom, $dateTo);
+        $topProductsList = ClickTrackerLog::getTopProducts(10, $dateFrom, $dateTo);
+        $topProduct = !empty($topProductsList) ? $topProductsList[0] : null;
 
         // Chart data
-        $clicksByDate = ClickTrackerLog::getClicksGroupedByDate($dateFrom, $dateTo, 'day');
+        $days = (strtotime($dateTo) - strtotime($dateFrom)) / 86400;
+        $groupBy = $days > self::CHART_DAILY_MAX_DAYS ? 'month' : 'day';
+        $clicksByDate = ClickTrackerLog::getClicksGroupedByDate($dateFrom, $dateTo, $groupBy);
         $clicksByElement = ClickTrackerLog::getClicksGroupedByElementType($dateFrom, $dateTo);
         $clicksByContext = ClickTrackerLog::getClicksGroupedByContext($dateFrom, $dateTo);
-        $topProductsList = ClickTrackerLog::getTopProducts(10, $dateFrom, $dateTo);
         $topPagesList = ClickTrackerLog::getTopPages(10, $dateFrom, $dateTo);
-
-        // Element type labels
-        $elementTypeLabels = array(
-            'whatsapp' => $this->l('WhatsApp'),
-            'phone' => $this->l('Phone'),
-            'maps' => $this->l('Maps'),
-            'other' => $this->l('Other'),
-        );
-
-        // Prepare chart data arrays
-        $chartDates = array();
-        $chartCounts = array();
-        foreach ($clicksByDate as $row) {
-            $chartDates[] = $row['date_group'];
-            $chartCounts[] = (int) $row['total'];
-        }
 
         $pieLabels = array();
         $pieCounts = array();
+        $pieColors = array();
         foreach ($clicksByElement as $row) {
-            $pieLabels[] = isset($elementTypeLabels[$row['element_type']]) ? $elementTypeLabels[$row['element_type']] : $row['element_type'];
+            $type = $row['element_type'];
+            $pieLabels[] = isset($elementTypeLabels[$type]) ? $elementTypeLabels[$type] : $type;
             $pieCounts[] = (int) $row['total'];
+            $pieColors[] = isset($this->elementColors[$type]) ? $this->elementColors[$type] : $this->elementColors['other'];
         }
 
         $this->context->smarty->assign(array(
-            'total_clicks' => $totalClicks,
+            'period_clicks' => $periodClicks,
             'this_month_clicks' => $thisMonthClicks,
             'most_clicked_type' => $mostClickedType ? (isset($elementTypeLabels[$mostClickedType]) ? $elementTypeLabels[$mostClickedType] : $mostClickedType) : '-',
             'top_product' => $topProduct,
             'date_from' => $dateFrom,
             'date_to' => $dateTo,
-            'chart_dates' => json_encode($chartDates),
-            'chart_counts' => json_encode($chartCounts),
+            'has_period_clicks' => $periodClicks > 0,
+            'chart_dates' => json_encode(array_keys($clicksByDate)),
+            'chart_counts' => json_encode(array_values($clicksByDate)),
             'pie_labels' => json_encode($pieLabels),
             'pie_counts' => json_encode($pieCounts),
+            'pie_colors' => json_encode($pieColors),
             'clicks_by_context' => $clicksByContext,
+            'context_types' => $this->getContextTypeLabels(),
             'top_products' => $topProductsList,
             'top_pages' => $topPagesList,
-            'moduleLink' => $this->context->link->getAdminLink('AdminModules', true) . '&configure=' . $this->name . '&section=stats',
+            'moduleLink' => $this->getModuleAdminLink(array('section' => 'stats')),
             'admin_token' => Tools::getAdminTokenLite('AdminModules'),
             'chart_js_path' => $this->_path . 'views/js/chart.min.js',
         ));
@@ -629,30 +725,35 @@ class ClickTracker extends Module
     }
 
     /**
-     * Process CSV export
+     * Neutralize values that spreadsheet software would interpret as formulas
+     *
+     * @param mixed $value Cell value
+     * @return string
+     */
+    protected function csvCell($value)
+    {
+        $value = (string) $value;
+        if ($value !== '' && strpos("=+-@\t\r", $value[0]) !== false) {
+            return "'" . $value;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Process CSV export (rows are streamed, not loaded in memory)
      */
     protected function processExportCsv()
     {
-        // Get current filters
-        $filters = array(
-            'context_type' => Tools::getValue('filter_context', ''),
-            'element_type' => Tools::getValue('filter_element', ''),
-            'date_from' => Tools::getValue('filter_date_from', ''),
-            'date_to' => Tools::getValue('filter_date_to', ''),
-            'search' => Tools::getValue('filter_search', ''),
-        );
+        $filters = $this->getLogFilters();
 
-        $filters = array_filter($filters, function ($value) {
-            return $value !== '';
-        });
+        // Discard any buffered back office output
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
 
-        // Get all logs matching filters
-        $logs = ClickTrackerLog::getLogsForExport($filters);
-
-        // Generate filename
         $filename = 'clicktracker_export_' . date('Y-m-d') . '.csv';
 
-        // Set headers for download
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="' . $filename . '"');
         header('Pragma: no-cache');
@@ -661,13 +762,12 @@ class ClickTracker extends Module
         // Output UTF-8 BOM for Excel compatibility
         echo "\xEF\xBB\xBF";
 
-        // Open output stream
         $output = fopen('php://output', 'w');
 
-        // Write header row
         fputcsv($output, array(
             $this->l('Date/Time'),
             $this->l('Context Type'),
+            $this->l('Page Type'),
             $this->l('Element Type'),
             $this->l('Clicked Class'),
             $this->l('Product ID'),
@@ -677,18 +777,20 @@ class ClickTracker extends Module
             $this->l('Page Title'),
         ), ';');
 
-        // Write data rows
-        foreach ($logs as $log) {
+        $db = Db::getInstance();
+        $result = ClickTrackerLog::queryLogsForExport($filters);
+        while ($result && ($log = $db->nextRow($result))) {
             fputcsv($output, array(
                 $log['date_add'],
                 $log['context_type'],
+                $this->csvCell($log['page_type']),
                 $log['element_type'],
-                $log['clicked_class'],
+                $this->csvCell($log['clicked_class']),
                 $log['id_product'] ?: '',
-                $log['product_name'] ?: '',
+                $this->csvCell($log['product_name']),
                 $log['id_category'] ?: '',
-                $log['page_url'],
-                $log['page_title'] ?: '',
+                $this->csvCell($log['page_url']),
+                $this->csvCell($log['page_title']),
             ), ';');
         }
 
@@ -697,103 +799,96 @@ class ClickTracker extends Module
     }
 
     /**
-     * Hook: displayHeader
-     * Injects tracking script into page header
+     * Detect the current page type and tracking context
      *
-     * @param array $params Hook parameters
-     * @return string HTML/JS to inject
+     * @param FrontController $controller Current controller
+     * @return array [context_type, page_type]
      */
-    public function hookDisplayHeader($params)
+    protected function getPageContext($controller)
     {
-        // Check if tracking is enabled for current page type
-        $controller = $this->context->controller;
+        $pageType = method_exists($controller, 'getPageName') ? (string) $controller->getPageName() : (string) $controller->php_self;
         $controllerName = get_class($controller);
 
-        $isProductPage = ($controllerName === 'ProductController' || $controller->php_self === 'product');
-        $isCmsPage = ($controllerName === 'CmsController' || $controller->php_self === 'cms'
-            || strpos($controllerName, 'Blog') !== false || strpos($controllerName, 'blog') !== false);
-
-        // Check configuration
-        $trackProduct = (bool) Configuration::get(self::CONFIG_PREFIX . 'TRACK_PRODUCT');
-        $trackCms = (bool) Configuration::get(self::CONFIG_PREFIX . 'TRACK_CMS');
-
-        // Get body classes configuration for additional page matching
-        $bodyClassesConfig = Configuration::get(self::CONFIG_PREFIX . 'BODY_CLASSES');
-        $bodyClassesArray = array();
-        if (!empty($bodyClassesConfig)) {
-            $bodyClassesArray = array_filter(array_map('trim', explode("\n", $bodyClassesConfig)));
+        if ($controller instanceof ProductController || $pageType === 'product') {
+            $context = ClickTrackerLog::CONTEXT_PRODUCT;
+        } elseif ($controller instanceof CmsController || $pageType === 'cms' || stripos($controllerName, 'blog') !== false || stripos($pageType, 'blog') !== false) {
+            $context = ClickTrackerLog::CONTEXT_CMS;
+        } elseif ($pageType === 'category') {
+            $context = ClickTrackerLog::CONTEXT_CATEGORY;
+        } elseif ($pageType === 'index') {
+            $context = ClickTrackerLog::CONTEXT_HOME;
+        } else {
+            $context = ClickTrackerLog::CONTEXT_OTHER;
         }
 
-        // Check if we should track based on standard page types
-        $shouldTrackByPageType = false;
-        if ($isProductPage && $trackProduct) {
-            $shouldTrackByPageType = true;
-        } elseif ($isCmsPage && $trackCms) {
-            $shouldTrackByPageType = true;
+        return array($context, Tools::substr(preg_replace('/[^a-zA-Z0-9_\-]/', '', $pageType), 0, 64));
+    }
+
+    /**
+     * Hook: actionFrontControllerSetMedia
+     * Registers the tracking script and its configuration
+     *
+     * @param array $params Hook parameters
+     */
+    public function hookActionFrontControllerSetMedia($params)
+    {
+        $controller = $this->context->controller;
+        if (!($controller instanceof FrontController) || !empty($controller->ajax)) {
+            return;
         }
 
-        // If body classes are configured, we'll let the JS handle the check
-        // because body classes are only available client-side
-        $hasBodyClassesConfig = !empty($bodyClassesArray);
-
-        // Don't render if no tracking conditions apply
-        if (!$shouldTrackByPageType && !$hasBodyClassesConfig) {
-            return '';
+        $selectors = $this->getTrackedSelectors();
+        if (empty($selectors)) {
+            return;
         }
 
-        // Get CSS classes to track
-        $cssClasses = Configuration::get(self::CONFIG_PREFIX . 'CSS_CLASSES');
-        if (empty($cssClasses)) {
-            return '';
+        list($contextType, $pageType) = $this->getPageContext($controller);
+
+        // Page type enabled server side?
+        $trackByType = array(
+            ClickTrackerLog::CONTEXT_PRODUCT => 'TRACK_PRODUCT',
+            ClickTrackerLog::CONTEXT_CMS => 'TRACK_CMS',
+        );
+        $configKey = isset($trackByType[$contextType]) ? $trackByType[$contextType] : 'TRACK_OTHER';
+        $shouldTrackByPageType = (bool) Configuration::get(self::CONFIG_PREFIX . $configKey);
+
+        // Body selectors can only be checked client side
+        $bodyClassesConfig = (string) Configuration::get(self::CONFIG_PREFIX . 'BODY_CLASSES');
+        $bodyClasses = array_values(array_filter(array_map('trim', explode("\n", $bodyClassesConfig)), 'strlen'));
+
+        if (!$shouldTrackByPageType && empty($bodyClasses)) {
+            return;
         }
 
-        $classesArray = array_filter(array_map('trim', explode("\n", $cssClasses)));
-        if (empty($classesArray)) {
-            return '';
-        }
-
-        // Get other configuration
-        $externalOnly = (bool) Configuration::get(self::CONFIG_PREFIX . 'EXTERNAL_ONLY');
-        $debug = (bool) Configuration::get(self::CONFIG_PREFIX . 'DEBUG');
-
-        // Generate security token
-        $token = Tools::getToken(false);
-
-        // Get AJAX endpoint URL
-        $ajaxUrl = $this->context->link->getModuleLink($this->name, 'ajax', array(), true);
-
-        // Prepare product data if on product page
         $productData = null;
-        if ($isProductPage && isset($this->context->controller->getProduct()->id)) {
-            $product = $this->context->controller->getProduct();
-            $productData = array(
-                'id_product' => (int) $product->id,
-                'product_name' => $product->name,
-                'id_category' => (int) $product->id_category_default,
-            );
+        if ($contextType === ClickTrackerLog::CONTEXT_PRODUCT && method_exists($controller, 'getProduct')) {
+            $product = $controller->getProduct();
+            if (Validate::isLoadedObject($product)) {
+                $productData = array('id_product' => (int) $product->id);
+            }
         }
 
-        // Determine context type
-        $contextType = 'cms';
-        if ($isProductPage) {
-            $contextType = 'product';
-        }
-
-        // Assign variables to template
-        $this->context->smarty->assign(array(
-            'et_clicktracker_classes' => json_encode($classesArray),
-            'et_clicktracker_body_classes' => json_encode($bodyClassesArray),
-            'et_clicktracker_external_only' => $externalOnly ? 'true' : 'false',
-            'et_clicktracker_debug' => $debug ? 'true' : 'false',
-            'et_clicktracker_token' => $token,
-            'et_clicktracker_ajax_url' => $ajaxUrl,
-            'et_clicktracker_context' => $contextType,
-            'et_clicktracker_product_data' => $productData ? json_encode($productData) : 'null',
-            'et_clicktracker_should_track' => $shouldTrackByPageType ? 'true' : 'false',
-            'et_clicktracker_js_path' => $this->_path . 'views/js/tracker.js',
+        Media::addJsDef(array(
+            'et_clickTrackerConfig' => array(
+                'classes' => $selectors,
+                'bodyClasses' => $bodyClasses,
+                'externalOnly' => (bool) Configuration::get(self::CONFIG_PREFIX . 'EXTERNAL_ONLY'),
+                'debug' => (bool) Configuration::get(self::CONFIG_PREFIX . 'DEBUG'),
+                'token' => Tools::getToken(false),
+                // Same protocol as the page: keeps the request same-origin
+                'ajaxUrl' => $this->context->link->getModuleLink($this->name, 'ajax', array(), Tools::usingSecureMode()),
+                'context' => $contextType,
+                'pageType' => $pageType,
+                'productData' => $productData,
+                'shouldTrackByPageType' => $shouldTrackByPageType,
+            ),
         ));
 
-        return $this->display(__FILE__, 'views/templates/hook/tracking-script.tpl');
+        $controller->registerJavascript(
+            'module-clicktracker-tracker',
+            'modules/' . $this->name . '/views/js/tracker.js',
+            array('position' => 'bottom', 'priority' => 200)
+        );
     }
 
     /**

@@ -2,7 +2,7 @@
 
 [![Support via PayPal](https://img.shields.io/badge/Support-PayPal-blue?logo=paypal)](https://www.paypal.com/paypalme/ettorestani)
 [![PrestaShop](https://img.shields.io/badge/PrestaShop-1.7.x--8.x-blue.svg)](https://www.prestashop.com/)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](https://github.com/ettorestani/Click-Tracker)
+[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](https://github.com/ettorestani/Click-Tracker)
 [![License](https://img.shields.io/badge/license-AFL%203.0-orange.svg)](https://opensource.org/licenses/AFL-3.0)
 [![PHP](https://img.shields.io/badge/php-7.2%2B-blue.svg)](https://www.php.net/)
 
@@ -140,12 +140,12 @@ Dashboard with:
 
 ### Frontend
 
-1. The module injects a lightweight JavaScript into the page header via the `displayHeader` hook
+1. The module registers a lightweight JavaScript through the `actionFrontControllerSetMedia` hook (compatible with CCC)
 2. The script uses **event delegation** to capture clicks on configured elements
 3. When a tracked click is detected:
    - Collects contextual data (product info or CMS page info)
    - Auto-detects element type (WhatsApp, Phone, Maps, Other)
-   - Sends data to the server via an asynchronous AJAX call (fire-and-forget)
+   - Sends data to the server with `navigator.sendBeacon` (fire-and-forget, survives page navigation)
 4. The user's click is **never blocked or delayed**
 
 ### Backend
@@ -241,10 +241,8 @@ Table: `ps_clicktracker_log`
 
 ### Warning
 
-Uninstalling this module will **permanently delete**:
-- All click tracking data
-- All module configuration settings
-- The `ps_clicktracker_log` database table
+Uninstalling (or resetting) this module deletes the module configuration settings.
+Click tracking data in `ps_clicktracker_log` is **kept** unless the **Delete Data on Uninstall** option is enabled.
 
 ### Uninstall Procedure
 
@@ -255,7 +253,11 @@ Uninstalling this module will **permanently delete**:
 
 ## Security
 
-- CSRF token protection on every AJAX request
+- Token check on every AJAX request
+- Origin/Referer and page URL restricted to the shop domains
+- Only selectors configured in the back office are accepted
+- Product name and category resolved server side from the product ID
+- Per-IP rate limiting (IP stored only as a salted hash)
 - SQL injection prevention (pSQL, ObjectModel ORM)
 - XSS protection (htmlspecialchars, strip_tags)
 - Rate limiting (30 requests/minute per session)
@@ -305,6 +307,18 @@ This module is released under the [Academic Free License (AFL 3.0)](https://open
 - Website: https://www.ettorestani.it
 
 ## Changelog
+
+### Version 1.1.0
+- Security: page URL and Origin restricted to the shop domains, configured selectors only, product data resolved server side, per-IP rate limiting (no PHP session)
+- Clicks on links opening in the same tab are no longer lost (`sendBeacon`)
+- Full CSS selectors allowed (e.g. `a[href^="tel:"]`)
+- New page contexts (home, category, other) with page type, and "Track All Other Pages" option
+- "External links only" now means links leaving the shop (other domains, tel:, mailto:, whatsapp:)
+- More reliable element type detection (link target first, whole class-name words)
+- Statistics: cards follow the selected period, chart shows days without clicks, fixed chart colors, top pages grouped by URL without query string
+- Text stored raw (no more double HTML encoding), streamed CSV export with formula neutralization
+- Multistore-aware (`id_shop`), data kept on uninstall unless requested
+- Non-destructive upgrade script from 1.0.0
 
 ### Version 1.0.0
 - Initial release

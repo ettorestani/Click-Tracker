@@ -46,8 +46,10 @@
      * Initialize Bootstrap tooltips
      */
     function initTooltips() {
-        $('[data-toggle="tooltip"]').tooltip();
-        $('[title]').tooltip();
+        // Scoped to the module panels, not the whole back office page
+        $('.clicktracker-logs-panel, .clicktracker-stats-wrapper')
+            .find('[data-toggle="tooltip"], [title]')
+            .tooltip();
     }
 
     /**
